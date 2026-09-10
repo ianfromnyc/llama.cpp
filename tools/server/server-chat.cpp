@@ -537,13 +537,18 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
         if (tools.is_array()) {
             json oai_tools = json::array();
             for (const auto & tool : tools) {
+                json function = {
+                    {"name", json_value(tool, "name", std::string())},
+                    {"description", json_value(tool, "description", std::string())},
+                    {"parameters", tool.contains("input_schema") ? tool.at("input_schema") : json::object()}
+                };
+                // Only emitted when true, so output for ordinary tools is unchanged.
+                if (json_value(tool, "defer_loading", false)) {
+                    function["defer_loading"] = true;
+                }
                 oai_tools.push_back({
                     {"type", "function"},
-                    {"function", {
-                        {"name", json_value(tool, "name", std::string())},
-                        {"description", json_value(tool, "description", std::string())},
-                        {"parameters", tool.contains("input_schema") ? tool.at("input_schema") : json::object()}
-                    }}
+                    {"function", function}
                 });
             }
             oai_body["tools"] = oai_tools;

@@ -2067,6 +2067,59 @@ static void test_convert_responses_to_chatcmpl() {
     }
 }
 
+static void test_anthropic_tool_conversion() {
+    LOG_DBG("%s\n", __func__);
+
+    // defer_loading on an Anthropic tool must reach the OpenAI-shaped tool, so
+    // common_chat_tools_parse_oaicompat can flag it for the render path. Only
+    // emitted when true - ordinary tools convert byte-identical to before.
+    {
+        json input = json::parse(R"({
+            "model": "test-model",
+            "max_tokens": 100,
+            "tools": [
+                {
+                    "name": "get_weather",
+                    "description": "Get weather for a location",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "location": {"type": "string"}
+                        }
+                    }
+                },
+                {
+                    "name": "search_tools",
+                    "description": "Search the tool set",
+                    "defer_loading": true,
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"}
+                        }
+                    }
+                }
+            ],
+            "messages": [
+                {"role": "user", "content": "hi"}
+            ]
+        })");
+
+        json result = server_chat_convert_anthropic_to_oai(input);
+
+        assert_equals(true, result.contains("tools"));
+        assert_equals((size_t)2, result.at("tools").size());
+
+        const auto & visible = result.at("tools")[0];
+        assert_equals(std::string("get_weather"), visible.at("function").at("name").get<std::string>());
+        assert_equals(false, visible.at("function").contains("defer_loading"));
+
+        const auto & deferred = result.at("tools")[1];
+        assert_equals(std::string("search_tools"), deferred.at("function").at("name").get<std::string>());
+        assert_equals(true, deferred.at("function").at("defer_loading").get<bool>());
+    }
+}
+
 // Shared LFM2 parser cases - all variants use one output format and parser
 static void test_lfm2_parser(const std::string & template_path, bool detailed_debug) {
     auto tst = peg_tester(template_path, detailed_debug);
@@ -7417,6 +7470,7 @@ int main(int argc, char ** argv) {
         test_tools_oaicompat_json_conversion();
         test_tool_defer_loading();
         test_convert_responses_to_chatcmpl();
+        test_anthropic_tool_conversion();
         test_developer_role_to_system_workaround();
         test_deepseek_v4_thinking_retention();
         test_deepseek_v4_tool_result_ordering();
