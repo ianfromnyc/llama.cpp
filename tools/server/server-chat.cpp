@@ -331,8 +331,81 @@ static void normalize_anthropic_billing_header(std::string & system_text) {
     }
 }
 
+// Render one tool_reference block as the text block that carries the tool's
+// definition. Resolved against the request's full tool list, deferred or not.
+static json anthropic_tool_reference_to_text(const std::string & name, const json & tools) {
+    for (const auto & tool : tools) {
+        if (json_value(tool, "name", std::string()) == name) {
+            json definition = {
+                {"name",        name},
+                {"description", json_value(tool, "description", std::string())},
+                {"parameters",  tool.contains("input_schema") ? tool.at("input_schema") : json::object()}
+            };
+            json part = {
+                {"type", "text"},
+                {"text", "<tool_reference name=\"" + name + "\">\n" + definition.dump() + "\n</tool_reference>"},
+            };
+            return part;
+        }
+    }
+    throw std::invalid_argument("Tool reference '" + name + "' not found in available tools");
+}
+
+// Expand tool_reference blocks in a tool_result content array into text parts.
+// Separates a reference from its neighbours with a blank line, so the rendered
+// prompt never runs the definition into adjacent text or a second reference.
+static json anthropic_expand_references_in_result(const json & result_content, const json & tools, bool & has_images) {
+    json parts = json::array();
+    std::string pending_sep;
+    for (const auto & c : result_content) {
+        std::string c_type = json_value(c, "type", std::string());
+        if (c_type == "tool_reference") {
+            std::string name = json_value(c, "tool_name", std::string());
+            json ref = anthropic_tool_reference_to_text(name, tools);
+            if (!parts.empty()) {
+                // The blank line rides on the text before the reference, or on
+                // its own part between two adjacent references.
+                parts.back()["text"] = parts.back().at("text").get<std::string>() + "\n\n";
+            }
+            parts.push_back(ref);
+            pending_sep = "\n\n";
+        } else if (c_type == "text") {
+            std::string text = json_value(c, "text", std::string());
+            parts.push_back({
+                {"type", "text"},
+                {"text", pending_sep + text}
+            });
+            pending_sep.clear();
+        } else if (c_type == "image") {
+            has_images = true;
+            json source = json_value(c, "source", json::object());
+            std::string source_type = json_value(source, "type", std::string());
+            if (source_type == "base64") {
+                std::string media_type = json_value(source, "media_type", std::string("image/jpeg"));
+                std::string data = json_value(source, "data", std::string());
+                std::string url = "data:" + media_type + ";base64," + data;
+                parts.push_back({
+                    {"type", "image_url"},
+                    {"image_url", {{"url", url}}}
+                });
+            } else if (source_type == "url") {
+                parts.push_back({
+                    {"type", "image_url"},
+                    {"image_url", {{"url", json_value(source, "url", std::string())}}}
+                });
+            }
+        }
+    }
+    return parts;
+}
+
 json server_chat_convert_anthropic_to_oai(const json & body) {
     json oai_body;
+
+    // tools must be available while converting messages: a tool_reference in a
+    // message resolves against the request's own tool list.
+    json oai_tools = json::array();
+    const json tools = body.contains("tools") && body.at("tools").is_array() ? body.at("tools") : json::array();
 
     // Convert system prompt
     json oai_messages = json::array();
@@ -393,12 +466,29 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
             json tool_results = json::array();
             std::string reasoning_content;
             bool has_tool_calls = false;
+            // set after a tool_reference: the next text part opens with a blank line
+            bool pending_ref_sep = false;
 
             for (const auto & block : content) {
                 std::string type = json_value(block, "type", std::string());
 
                 if (type == "text") {
-                    converted_content.push_back(block);
+                    if (pending_ref_sep) {
+                        converted_content.push_back({{"type", "text"}, {"text", "\n\n" + json_value(block, "text", std::string())}});
+                        pending_ref_sep = false;
+                    } else {
+                        converted_content.push_back(block);
+                    }
+                } else if (type == "tool_reference") {
+                    // The API allows a reference outside a tool result too.
+                    json ref = anthropic_tool_reference_to_text(json_value(block, "tool_name", std::string()), tools);
+                    if (!converted_content.empty() && json_value(converted_content.back(), "type", std::string()) == "text") {
+                        converted_content.back()["text"] = converted_content.back().at("text").get<std::string>() + "\n\n";
+                    } else if (!converted_content.empty()) {
+                        converted_content.push_back({{"type", "text"}, {"text", "\n\n"}});
+                    }
+                    converted_content.push_back(ref);
+                    pending_ref_sep = true;
                 } else if (type == "thinking") {
                     reasoning_content += json_value(block, "thinking", std::string());
                 } else if (type == "image") {
@@ -449,41 +539,14 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
                     } else if (result_content.is_array()) {
                         // Single-pass: build both text and content_parts, decide format at the end
                         std::string result_text;
-                        json content_parts = json::array();
                         bool has_images = false;
-
-                        for (const auto & c : result_content) {
-                            std::string c_type = json_value(c, "type", std::string());
-                            if (c_type == "text") {
-                                std::string text = json_value(c, "text", std::string());
-                                result_text += text;
-                                content_parts.push_back({
-                                    {"type", "text"},
-                                    {"text", text}
-                                });
-                            } else if (c_type == "image") {
-                                has_images = true;
-                                json source = json_value(c, "source", json::object());
-                                std::string source_type = json_value(source, "type", std::string());
-                                if (source_type == "base64") {
-                                    std::string media_type = json_value(source, "media_type", std::string("image/jpeg"));
-                                    std::string data = json_value(source, "data", std::string());
-                                    std::string url = "data:" + media_type + ";base64," + data;
-                                    content_parts.push_back({
-                                        {"type", "image_url"},
-                                        {"image_url", {{"url", url}}}
-                                    });
-                                } else if (source_type == "url") {
-                                    content_parts.push_back({
-                                        {"type", "image_url"},
-                                        {"image_url", {{"url", json_value(source, "url", std::string())}}}
-                                    });
-                                }
-                            }
-                        }
+                        json content_parts = anthropic_expand_references_in_result(result_content, tools, has_images);
 
                         if (!has_images) {
                             // Text-only: collapse to a plain string for maximum compatibility
+                            for (const auto & p : content_parts) {
+                                result_text += json_value(p, "text", std::string());
+                            }
                             tool_results.push_back({
                                 {"role", "tool"},
                                 {"tool_call_id", tool_use_id},
@@ -532,25 +595,23 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
     oai_body["messages"] = oai_messages;
 
     // Convert tools
-    if (body.contains("tools")) {
-        const json & tools = body.at("tools");
-        if (tools.is_array()) {
-            json oai_tools = json::array();
-            for (const auto & tool : tools) {
-                json function = {
-                    {"name", json_value(tool, "name", std::string())},
-                    {"description", json_value(tool, "description", std::string())},
-                    {"parameters", tool.contains("input_schema") ? tool.at("input_schema") : json::object()}
-                };
-                // Only emitted when true, so output for ordinary tools is unchanged.
-                if (json_value(tool, "defer_loading", false)) {
-                    function["defer_loading"] = true;
-                }
-                oai_tools.push_back({
-                    {"type", "function"},
-                    {"function", function}
-                });
+    if (body.contains("tools") && body.at("tools").is_array()) {
+        for (const auto & tool : body.at("tools")) {
+            json function = {
+                {"name", json_value(tool, "name", std::string())},
+                {"description", json_value(tool, "description", std::string())},
+                {"parameters", tool.contains("input_schema") ? tool.at("input_schema") : json::object()}
+            };
+            // Only emitted when true, so output for ordinary tools is unchanged.
+            if (json_value(tool, "defer_loading", false)) {
+                function["defer_loading"] = true;
             }
+            oai_tools.push_back({
+                {"type", "function"},
+                {"function", function}
+            });
+        }
+        if (!oai_tools.empty()) {
             oai_body["tools"] = oai_tools;
         }
     }

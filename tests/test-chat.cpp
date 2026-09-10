@@ -2120,6 +2120,174 @@ static void test_anthropic_tool_conversion() {
     }
 }
 
+static void test_anthropic_tool_reference_expansion() {
+    LOG_DBG("%s\n", __func__);
+
+    const json tools = json::array({
+        json{
+            {"name", "tool_search"},
+            {"description", "Search the tool set"},
+            {"input_schema", json::object()},
+        },
+        json{
+            {"name", "get_weather"},
+            {"description", "Get the weather"},
+            {"defer_loading", true},
+            {"input_schema", {
+                {"type", "object"},
+                {"properties", {
+                    {"city", {{"type", "string"}}}
+                }}
+            }},
+        },
+        json{
+            {"name", "get_time"},
+            {"input_schema", json::object()},
+        },
+    });
+
+    // 1. a reference inside a tool_result expands into a text part carrying
+    //    the definition; text around it keeps a blank line on each side.
+    {
+        json input = json::parse(R"({
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": "tool_search",
+                            "input": {"query": "select:get_weather"}
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": [
+                                {"type": "text", "text": "1 match"},
+                                {"type": "tool_reference", "tool_name": "get_weather"}
+                            ]
+                        }
+                    ]
+                }
+            ]
+        })");
+        input["tools"] = tools;
+
+        json result = server_chat_convert_anthropic_to_oai(input);
+
+        // input order is preserved: assistant tool_calls first, then the tool message
+        const json & msgs = result.at("messages");
+        assert_equals((size_t)2, msgs.size());
+        assert_equals(std::string("assistant"), msgs[0].at("role").get<std::string>());
+        assert_equals(std::string("tool"), msgs[1].at("role").get<std::string>());
+        assert_equals(std::string("1 match\n\n<tool_reference name=\"get_weather\">\n"
+                                  "{\"name\":\"get_weather\",\"description\":\"Get the weather\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}}\n"
+                                  "</tool_reference>"),
+                      msgs[1].at("content").get<std::string>());
+    }
+
+    // 2. references back to back get one blank line between each pair.
+    {
+        json input = json::parse(R"({
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": [
+                                {"type": "tool_reference", "tool_name": "get_weather"},
+                                {"type": "tool_reference", "tool_name": "get_time"}
+                            ]
+                        }
+                    ]
+                }
+            ]
+        })");
+        input["tools"] = tools;
+
+        json result = server_chat_convert_anthropic_to_oai(input);
+
+        const json & msgs = result.at("messages");
+        assert_equals((size_t)1, msgs.size());
+        assert_equals(std::string("<tool_reference name=\"get_weather\">\n"
+                                  "{\"name\":\"get_weather\",\"description\":\"Get the weather\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}}\n"
+                                  "</tool_reference>\n\n"
+                                  "<tool_reference name=\"get_time\">\n"
+                                  "{\"name\":\"get_time\",\"description\":\"\",\"parameters\":{}}\n"
+                                  "</tool_reference>"),
+                      msgs[0].at("content").get<std::string>());
+    }
+
+    // 3. a reference at the top level of user content expands too.
+    {
+        json input = json::parse(R"({
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_reference", "tool_name": "get_weather"},
+                        {"type": "text", "text": "weather in Paris?"}
+                    ]
+                }
+            ]
+        })");
+        input["tools"] = tools;
+
+        json result = server_chat_convert_anthropic_to_oai(input);
+
+        const json & msgs = result.at("messages");
+        assert_equals((size_t)1, msgs.size());
+        assert_equals(std::string("user"), msgs[0].at("role").get<std::string>());
+        const json & parts = msgs[0].at("content");
+        assert_equals((size_t)2, parts.size());
+        assert_equals(std::string("<tool_reference name=\"get_weather\">\n"
+                                  "{\"name\":\"get_weather\",\"description\":\"Get the weather\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}}\n"
+                                  "</tool_reference>"),
+                      parts[0].at("text").get<std::string>());
+        assert_equals(std::string("\n\nweather in Paris?"), parts[1].at("text").get<std::string>());
+    }
+
+    // 4. a reference to a name not in tools is a 400.
+    {
+        json input = json::parse(R"({
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_reference", "tool_name": "no_such_tool"}
+                    ]
+                }
+            ]
+        })");
+        input["tools"] = tools;
+
+        bool threw = false;
+        try {
+            server_chat_convert_anthropic_to_oai(input);
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            assert_equals(std::string("Tool reference 'no_such_tool' not found in available tools"), std::string(e.what()));
+        }
+        assert_equals(true, threw);
+    }
+}
+
 // Shared LFM2 parser cases - all variants use one output format and parser
 static void test_lfm2_parser(const std::string & template_path, bool detailed_debug) {
     auto tst = peg_tester(template_path, detailed_debug);
@@ -7471,6 +7639,7 @@ int main(int argc, char ** argv) {
         test_tool_defer_loading();
         test_convert_responses_to_chatcmpl();
         test_anthropic_tool_conversion();
+        test_anthropic_tool_reference_expansion();
         test_developer_role_to_system_workaround();
         test_deepseek_v4_thinking_retention();
         test_deepseek_v4_tool_result_ordering();
