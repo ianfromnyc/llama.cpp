@@ -475,17 +475,22 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
                 std::string type = json_value(block, "type", std::string());
 
                 if (type == "text") {
+                    // normalize: a raw block is stored verbatim and may lack
+                    // the text member entirely
+                    json norm = {
+                        {"type", "text"},
+                        {"text", json_value(block, "text", std::string())}
+                    };
                     if (pending_ref_sep) {
-                        converted_content.push_back({{"type", "text"}, {"text", "\n\n" + json_value(block, "text", std::string())}});
+                        norm["text"] = "\n\n" + json_value(norm, "text", std::string());
                         pending_ref_sep = false;
-                    } else {
-                        converted_content.push_back(block);
                     }
+                    converted_content.push_back(norm);
                 } else if (type == "tool_reference") {
                     // The API allows a reference outside a tool result too.
                     json ref = anthropic_tool_reference_to_text(json_value(block, "tool_name", std::string()), tools);
                     if (!converted_content.empty() && json_value(converted_content.back(), "type", std::string()) == "text") {
-                        converted_content.back()["text"] = converted_content.back().at("text").get<std::string>() + "\n\n";
+                        converted_content.back()["text"] = json_value(converted_content.back(), "text", std::string()) + "\n\n";
                     } else if (!converted_content.empty()) {
                         converted_content.push_back({{"type", "text"}, {"text", "\n\n"}});
                     }

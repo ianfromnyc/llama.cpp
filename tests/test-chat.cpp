@@ -2261,6 +2261,36 @@ static void test_anthropic_tool_reference_expansion() {
         assert_equals(std::string("\n\nweather in Paris?"), parts[1].at("text").get<std::string>());
     }
 
+    // 3b. a text block without a text member must convert as empty text, so the
+    //     reference after it still finds a text part to hang its separator on.
+    {
+        json input = json::parse(R"({
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text"},
+                        {"type": "tool_reference", "tool_name": "get_weather"}
+                    ]
+                }
+            ]
+        })");
+        input["tools"] = tools;
+
+        json result = server_chat_convert_anthropic_to_oai(input);
+
+        const json & parts = result.at("messages")[0].at("content");
+        assert_equals((size_t)2, parts.size());
+        // the blank line rides on the empty text part before the reference
+        assert_equals(std::string("\n\n"), parts[0].at("text").get<std::string>());
+        assert_equals(std::string("<tool_reference name=\"get_weather\">\n"
+                                  "{\"name\":\"get_weather\",\"description\":\"Get the weather\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}}\n"
+                                  "</tool_reference>"),
+                      parts[1].at("text").get<std::string>());
+    }
+
     // 4. a reference to a name not in tools is a 400.
     {
         json input = json::parse(R"({
