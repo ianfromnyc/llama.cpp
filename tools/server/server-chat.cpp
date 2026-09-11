@@ -1,6 +1,9 @@
 #include "server-chat.h"
 #include "server-common.h"
 
+#include "unicode.h"
+
+#include <algorithm>
 #include <sstream>
 
 json server_chat_convert_responses_to_chatcmpl(const json & response_body) {
@@ -365,15 +368,42 @@ static json anthropic_tool_reference_to_text(const std::string & name, const jso
     }
     // The name is client input: bound it and strip control characters so the
     // 400 body (and the server log, which repeats it) cannot be flooded or
-    // have forged lines injected via embedded newlines.
+    // have forged lines injected via embedded newlines. Truncation stops at
+    // sequence boundaries so the echo never ends in a partial UTF-8 sequence.
     std::string quoted;
-    for (size_t i = 0; i < name.size() && quoted.size() < 64; ++i) {
+    for (size_t i = 0; i < name.size();) {
         const unsigned char ch = name[i];
-        if (ch >= 0x20 && ch != 0x7f) {
-            quoted += ch;
-        } else if (ch == '\n' || ch == '\r') {
-            quoted += "\\n";
+        const size_t seq_len = std::max<size_t>(common_utf8_sequence_length(ch), 1);
+        if (i + seq_len > name.size() || quoted.size() + seq_len > 64) {
+            break;
         }
+        bool continuation_broken = false;
+        for (size_t k = 1; k < seq_len; ++k) {
+            if ((static_cast<unsigned char>(name[i + k]) & 0xC0) != 0x80) {
+                // malformed sequence: copy it byte by byte so every remainder
+                // position is reachable
+                continuation_broken = true;
+                break;
+            }
+        }
+        if (continuation_broken) {
+            if (ch >= 0x20 && ch != 0x7f) {
+                quoted += ch;
+            } else if (ch == '\n' || ch == '\r') {
+                quoted += "\\n";
+            }
+            ++i;
+            continue;
+        }
+        for (size_t k = 0; k < seq_len; ++k) {
+            const unsigned char b = name[i + k];
+            if (b >= 0x20 && b != 0x7f) {
+                quoted += b;
+            } else if (b == '\n' || b == '\r') {
+                quoted += "\\n";
+            }
+        }
+        i += seq_len;
     }
     throw std::invalid_argument("Tool reference '" + quoted + "' not found in available tools");
 }

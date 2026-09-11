@@ -2405,7 +2405,11 @@ static void test_anthropic_tool_reference_expansion() {
         }
         assert_equals(true, threw);
 
-        for (const std::string & name : { std::string(128, 'x'), std::string("bad\ninjected log line") }) {
+        // the last name places a two-byte sequence exactly across the 64-byte
+        // cut, so byte-wise truncation would emit a partial UTF-8 sequence
+        for (const std::string & name : { std::string(128, 'x'), std::string("bad\ninjected log line"),
+                                          std::string("caf\xc3\xa9\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e"),
+                                          std::string(63, 'z') + "\xc3\xa9" }) {
             input["messages"][0]["content"][0]["tool_name"] = name;
             threw = false;
             try {
@@ -2416,12 +2420,47 @@ static void test_anthropic_tool_reference_expansion() {
                 if (what.size() > 128) {
                     throw std::runtime_error("error message echoes an unbounded tool_name");
                 }
-                if (what.find(name) != std::string::npos) {
+                // a name longer than the echo bound must not come back whole
+                if (name.size() > 64 && what.find(name) != std::string::npos) {
                     throw std::runtime_error("error message echoes the full untruncated tool_name");
                 }
                 for (const char ch : what) {
                     if (static_cast<unsigned char>(ch) < 0x20 || static_cast<unsigned char>(ch) == 0x7f) {
                         throw std::runtime_error("error message contains control characters - log injection");
+                    }
+                }
+                // the echoed name must stay valid UTF-8: no truncated multi-byte
+                // sequence may reach the 400 body (dump_safe currently masks
+                // this, but the message itself must be well-formed)
+                if (name.size() > 64) {
+                    std::string marker = "Tool reference '";
+                    size_t start = what.find(marker);
+                    size_t end = what.find("' not found in available tools");
+                    if (start != std::string::npos && end != std::string::npos) {
+                        std::string echoed = what.substr(start + marker.size(), end - start - marker.size());
+                        size_t offset = 0;
+                        bool ok = true;
+                        while (offset < echoed.size()) {
+                            const unsigned char c = echoed[offset];
+                            int expected = (c >= 0xF0) ? 4 : (c >= 0xE0) ? 3 : (c >= 0xC0) ? 2 : 1;
+                            if ((c & 0xC0) == 0x80 || offset + expected > echoed.size()) {
+                                ok = false;
+                                break;
+                            }
+                            for (int k = 1; k < expected; ++k) {
+                                if ((echoed[offset + k] & 0xC0) != 0x80) {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                            if (!ok) {
+                                break;
+                            }
+                            offset += expected;
+                        }
+                        if (!ok) {
+                            throw std::runtime_error("error message contains a truncated UTF-8 sequence");
+                        }
                     }
                 }
             }
