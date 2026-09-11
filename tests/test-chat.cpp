@@ -2286,6 +2286,42 @@ static void test_anthropic_tool_reference_expansion() {
         }
         assert_equals(true, threw);
     }
+
+    // 5. a reference that follows an image must not crash on the image part;
+    //    the blank line goes on its own part before the definition.
+    {
+        json input = json::parse(R"({
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": [
+                                {"type": "image", "source": {"type": "url", "url": "https://example.com/x.png"}},
+                                {"type": "tool_reference", "tool_name": "get_weather"}
+                            ]
+                        }
+                    ]
+                }
+            ]
+        })");
+        input["tools"] = tools;
+
+        json result = server_chat_convert_anthropic_to_oai(input);
+
+        const json & parts = result.at("messages")[0].at("content");
+        assert_equals((size_t)3, parts.size());
+        assert_equals(std::string("image_url"), parts[0].at("type").get<std::string>());
+        assert_equals(std::string("\n\n"), parts[1].at("text").get<std::string>());
+        assert_equals(std::string("<tool_reference name=\"get_weather\">\n"
+                                  "{\"name\":\"get_weather\",\"description\":\"Get the weather\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}}\n"
+                                  "</tool_reference>"),
+                      parts[2].at("text").get<std::string>());
+    }
 }
 
 // Shared LFM2 parser cases - all variants use one output format and parser

@@ -362,10 +362,12 @@ static json anthropic_expand_references_in_result(const json & result_content, c
         if (c_type == "tool_reference") {
             std::string name = json_value(c, "tool_name", std::string());
             json ref = anthropic_tool_reference_to_text(name, tools);
-            if (!parts.empty()) {
-                // The blank line rides on the text before the reference, or on
-                // its own part between two adjacent references.
-                parts.back()["text"] = parts.back().at("text").get<std::string>() + "\n\n";
+            // The blank line rides on the text before the reference, or on its
+            // own part when the neighbour is not text (e.g. an image part).
+            if (!parts.empty() && json_value(parts.back(), "type", std::string()) == "text") {
+                parts.back()["text"] = json_value(parts.back(), "text", std::string()) + "\n\n";
+            } else if (!parts.empty()) {
+                parts.push_back({{"type", "text"}, {"text", "\n\n"}});
             }
             parts.push_back(ref);
             pending_sep = "\n\n";
