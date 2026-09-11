@@ -1608,6 +1608,16 @@ See [Anthropic Messages API documentation](https://docs.anthropic.com/en/api/mes
 
 `tool_choice`: Tool selection mode (`{"type": "auto"}`, `{"type": "any"}`, or `{"type": "tool", "name": "..."}`)
 
+`tools[].defer_loading`: When `true`, the tool is still declared to the sampling grammar - so the model can call it - but its schema is left out of the rendered prompt, same as `tools[].function.defer_loading` on `/v1/chat/completions`. At least one tool must be left un-deferred, otherwise the request is rejected.
+
+A user or `tool_result` content block of type `tool_reference` expands to a text block carrying the named tool's definition, so a schema can be revealed to the model on demand:
+
+```json
+{"type": "text", "text": "<tool_reference name=\"X\">\n{\"name\":\"X\",\"description\":\"...\",\"parameters\":{...}}\n</tool_reference>"}
+```
+
+`tool_reference` blocks are accepted inside a `tool_result` content array and at the top level of user content. A `tool_name` that is missing, empty, or does not match a declared tool is an invalid request (HTTP 400), as is a tool list that is entirely deferred.
+
 *Examples:*
 
 ```shell
