@@ -334,6 +334,11 @@ static void normalize_anthropic_billing_header(std::string & system_text) {
 // Render one tool_reference block as the text block that carries the tool's
 // definition. Resolved against the request's full tool list, deferred or not.
 static json anthropic_tool_reference_to_text(const std::string & name, const json & tools) {
+    if (name.empty()) {
+        // An absent tool_name would otherwise match a tool that itself has no
+        // name; treat it as an unknown reference.
+        throw std::invalid_argument("Tool reference '' not found in available tools");
+    }
     for (const auto & tool : tools) {
         if (json_value(tool, "name", std::string()) == name) {
             json definition = {

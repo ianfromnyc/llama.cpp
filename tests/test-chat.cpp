@@ -2436,6 +2436,61 @@ static void test_anthropic_tool_reference_expansion() {
                                   "</tool_reference>"),
                       parts[2].at("text").get<std::string>());
     }
+
+    // 6. a missing or empty tool_name is treated as an unknown reference (400),
+    //    not as a match against a tool that itself has no name.
+    {
+        json input = json::parse(R"({
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_reference"}
+                    ]
+                }
+            ]
+        })");
+        input["tools"] = tools;
+
+        bool threw = false;
+        try {
+            server_chat_convert_anthropic_to_oai(input);
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            assert_equals(std::string("Tool reference '' not found in available tools"), std::string(e.what()));
+        }
+        assert_equals(true, threw);
+    }
+
+    // 7. an empty tool_name must not match a tool that itself lacks a name.
+    {
+        json input = json::parse(R"({
+            "model": "test-model",
+            "max_tokens": 100,
+            "tools": [
+                {"description": "unnamed tool", "input_schema": {}}
+            ],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_reference"}
+                    ]
+                }
+            ]
+        })");
+
+        bool threw = false;
+        try {
+            server_chat_convert_anthropic_to_oai(input);
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            assert_equals(std::string("Tool reference '' not found in available tools"), std::string(e.what()));
+        }
+        assert_equals(true, threw);
+    }
 }
 
 // Shared LFM2 parser cases - all variants use one output format and parser
