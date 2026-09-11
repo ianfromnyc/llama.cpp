@@ -2178,31 +2178,51 @@ static void test_anthropic_tool_conversion() {
     }
 
     // a tool_reference outside the documented scope (tool_result content or
-    // user content) is left as an unknown block rather than expanding a tool
-    // definition into another role's content.
+    // top-level user content) is a client error: reject with invalid_argument
+    // (HTTP 400) at the conversion layer, so it can never reach the OpenAI
+    // message list as an unknown part type (which would surface as a 500 from
+    // common_chat_msgs_parse_oaicompat when the body is applied).
     {
-        json input = json::parse(R"({
-            "model": "test-model",
-            "max_tokens": 100,
-            "tools": [
-                {"name": "get_weather", "input_schema": {}}
-            ],
-            "messages": [
-                {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "tool_reference", "tool_name": "get_weather"}
-                    ]
-                }
-            ]
-        })");
+        for (const std::string role : { std::string("assistant"), std::string("system"), std::string("unknown_role") }) {
+            json input = json::parse(R"({
+                "model": "test-model",
+                "max_tokens": 100,
+                "tools": [
+                    {"name": "get_weather", "input_schema": {}}
+                ],
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "tool_reference", "tool_name": "get_weather"}
+                        ]
+                    }
+                ]
+            })");
+            input["messages"][0]["role"] = role;
 
-        json result = server_chat_convert_anthropic_to_oai(input);
-        const json & parts = result.at("messages")[0].at("content");
-        assert_equals((size_t) 1, parts.size());
-        assert_equals(std::string("tool_reference"), parts[0].at("type").get<std::string>());
-        if (parts[0].contains("text")) {
-            throw std::runtime_error("tool_reference expanded outside the documented scope");
+            bool threw = false;
+            try {
+                server_chat_convert_anthropic_to_oai(input);
+            } catch (const std::invalid_argument & e) {
+                threw = true;
+                std::string what = e.what();
+                if (what.find("tool_reference") == std::string::npos) {
+                    throw std::runtime_error(std::string("unexpected error message: ") + what);
+                }
+            }
+            assert_equals(true, threw);
+
+            // Exercise the full server path: the converted body must be
+            // accepted by oaicompat_chat_params_parse whenever conversion
+            // succeeds - a misplaced block must never get that far.
+            if (!threw) {
+                server_chat_params opt;
+                opt.use_jinja = false;
+                std::vector<raw_buffer> out_files;
+                oaicompat_chat_params_parse(input, opt, out_files);
+                throw std::runtime_error("misplaced tool_reference passed params parse (would be a 500)");
+            }
         }
     }
 }

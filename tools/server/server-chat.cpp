@@ -516,14 +516,15 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
                     converted_content.push_back(norm);
                 } else if (type == "tool_reference") {
                     // The API documents references in tool_result content and at
-                    // the top level of user content only; elsewhere the block is
-                    // kept as-is rather than expanding into another role's text.
-                    if (role == "user") {
-                        anthropic_append_reference(converted_content, block, tools, expanded_refs);
-                        pending_ref_sep = "\n\n";
-                    } else {
-                        converted_content.push_back(block);
+                    // the top level of user content only. Elsewhere the block
+                    // would reach the OpenAI message list as an unknown part
+                    // type and surface as a 500, so reject it here as the
+                    // client error it is.
+                    if (role != "user") {
+                        throw std::invalid_argument("tool_reference is only valid in tool_result content or user content");
                     }
+                    anthropic_append_reference(converted_content, block, tools, expanded_refs);
+                    pending_ref_sep = "\n\n";
                 } else if (type == "thinking") {
                     reasoning_content += json_value(block, "thinking", std::string());
                 } else if (type == "image") {
