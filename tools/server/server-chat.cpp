@@ -517,9 +517,15 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
                     pending_ref_sep.clear();
                     converted_content.push_back(norm);
                 } else if (type == "tool_reference") {
-                    // The API allows a reference outside a tool result too.
-                    anthropic_append_reference(converted_content, block, tools, expanded_refs);
-                    pending_ref_sep = "\n\n";
+                    // The API documents references in tool_result content and at
+                    // the top level of user content only; elsewhere the block is
+                    // kept as-is rather than expanding into another role's text.
+                    if (role == "user") {
+                        anthropic_append_reference(converted_content, block, tools, expanded_refs);
+                        pending_ref_sep = "\n\n";
+                    } else {
+                        converted_content.push_back(block);
+                    }
                 } else if (type == "thinking") {
                     reasoning_content += json_value(block, "thinking", std::string());
                 } else if (type == "image") {

@@ -2176,6 +2176,35 @@ static void test_anthropic_tool_conversion() {
         }
         assert_equals(true, threw);
     }
+
+    // a tool_reference outside the documented scope (tool_result content or
+    // user content) is left as an unknown block rather than expanding a tool
+    // definition into another role's content.
+    {
+        json input = json::parse(R"({
+            "model": "test-model",
+            "max_tokens": 100,
+            "tools": [
+                {"name": "get_weather", "input_schema": {}}
+            ],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_reference", "tool_name": "get_weather"}
+                    ]
+                }
+            ]
+        })");
+
+        json result = server_chat_convert_anthropic_to_oai(input);
+        const json & parts = result.at("messages")[0].at("content");
+        assert_equals((size_t) 1, parts.size());
+        assert_equals(std::string("tool_reference"), parts[0].at("type").get<std::string>());
+        if (parts[0].contains("text")) {
+            throw std::runtime_error("tool_reference expanded outside the documented scope");
+        }
+    }
 }
 
 static void test_anthropic_tool_reference_expansion() {
