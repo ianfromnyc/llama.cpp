@@ -1786,6 +1786,128 @@ static void test_tools_oaicompat_json_conversion() {
                               "  }\n"
                               "]"),
                   common_chat_tools_to_json_oaicompat({ special_function_tool }).dump(2));
+
+    // malformed tool input is rejected with a 400-shaped invalid_argument whose
+    // message names the problem without echoing the payload back
+    const std::vector<std::pair<const char *, const char *>> bad_input = {
+        { R"([{"type": "function", "function": {"name": "f", "description": "secret_marker"}}, {"type": "bogus"}])",
+          "Unsupported tool type (expected \"function\")" },
+        { R"({"type": "bogus", "secret_marker": "x"})",
+          "Expected 'tools' to be an array" },
+        { R"([{"type": "function", "defer_loading": 1, "function": {"name": "f", "parameters": {}}}])",
+          "defer_loading must be a boolean" },
+        { R"([{"type": "function", "function": {"description": "secret_marker"}}])",
+          "Tool function must have a string name" },
+    };
+    for (const auto & entry : bad_input) {
+        bool threw = false;
+        try {
+            common_chat_tools_parse_oaicompat(json::parse(entry.first));
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            std::string what = e.what();
+            if (what.find(entry.second) == std::string::npos || what.find("secret_marker") != std::string::npos) {
+                throw std::runtime_error(std::string("unexpected parse error message: ") + what);
+            }
+        }
+        if (!threw) {
+            throw std::runtime_error(std::string("expected an error for: ") + entry.first);
+        }
+    }
+}
+
+static void test_tool_defer_loading() {
+    LOG_DBG("%s\n", __func__);
+
+    common_chat_tool deferred_tool = python_tool;
+    deferred_tool.defer_loading    = true;
+
+    // 1. the flag survives the oaicompat round trip (paired with a visible tool,
+    //    since an all-deferred set is rejected - see case 5)
+    {
+        auto oai  = common_chat_tools_to_json_oaicompat({ special_function_tool, deferred_tool });
+        auto back = common_chat_tools_parse_oaicompat(oai);
+        assert_equals((size_t) 2, back.size());
+        assert_equals(false, back[0].defer_loading);
+        assert_equals(true, back[1].defer_loading);
+    }
+
+    // 2. clients may put the flag on the tool object instead of inside "function"
+    {
+        json tools = json::array({
+            json{
+                { "type", "function" },
+                { "defer_loading", true },
+                { "function", { { "name", "special_function" }, { "description", "" },
+                                { "parameters", json::object() } } },
+            },
+            json{
+                { "type", "function" },
+                { "function", { { "name", "get_time" }, { "description", "" },
+                                { "parameters", json::object() } } },
+            },
+        });
+        auto parsed = common_chat_tools_parse_oaicompat(tools);
+        assert_equals((size_t) 2, parsed.size());
+        assert_equals(true, parsed[0].defer_loading);
+        assert_equals(false, parsed[1].defer_loading);
+    }
+
+    // 3. skip_deferred omits it; the default keeps it (the grammar needs it)
+    {
+        std::vector<common_chat_tool> tools{ special_function_tool, deferred_tool };
+        assert_equals((size_t) 2, common_chat_tools_to_json_oaicompat(tools).size());
+        auto visible = common_chat_tools_to_json_oaicompat(tools, /* skip_deferred = */ true);
+        assert_equals((size_t) 1, visible.size());
+        assert_equals(std::string("special_function"),
+                      visible[0].at("function").at("name").get<std::string>());
+    }
+
+    // 4. the whole point: a deferred tool is absent from the rendered prompt but
+    //    still present in the grammar, so it stays callable while costing no
+    //    context - and revealing it later does not change the declared set.
+    {
+        auto tmpls = read_templates("models/templates/NousResearch-Hermes-2-Pro-Llama-3-8B-tool_use.jinja");
+
+        common_chat_templates_inputs inputs;
+        inputs.messages = { simple_assist_msg("", ""), };
+        inputs.messages[0].role    = "user";
+        inputs.messages[0].content = "hey";
+        inputs.tools               = { special_function_tool, deferred_tool };
+        inputs.tool_choice         = COMMON_CHAT_TOOL_CHOICE_AUTO;
+
+        auto params = common_chat_templates_apply(tmpls.get(), inputs);
+
+        if (params.prompt.find("special_function") == std::string::npos) {
+            throw std::runtime_error("visible tool missing from the prompt");
+        }
+        if (params.prompt.find(python_tool.name) != std::string::npos) {
+            throw std::runtime_error("deferred tool leaked into the prompt");
+        }
+        if (params.grammar.find(python_tool.name) == std::string::npos) {
+            throw std::runtime_error("deferred tool missing from the grammar - it would not be callable");
+        }
+    }
+
+    // 5. deferring everything would render a prompt that never mentions tools
+    //    while the grammar still expects calls - reject it with a 400-shaped
+    //    invalid_argument, not the generic parse wrapper.
+    {
+        common_chat_tool other = special_function_tool;
+        other.defer_loading    = true;
+        bool threw             = false;
+        try {
+            common_chat_tools_parse_oaicompat(
+                common_chat_tools_to_json_oaicompat({ deferred_tool, other }));
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            assert_equals(std::string("All tools have defer_loading set; at least one must be rendered"),
+                          std::string(e.what()));
+        }
+        if (!threw) {
+            throw std::runtime_error("expected an error when every tool sets defer_loading");
+        }
+    }
 }
 
 static void test_convert_responses_to_chatcmpl() {
@@ -1973,6 +2095,568 @@ static void test_convert_responses_to_chatcmpl() {
         json result = server_chat_convert_responses_to_chatcmpl(input);
 
         assert_equals(false, result.contains("tools"));
+    }
+}
+
+static void test_anthropic_tool_conversion() {
+    LOG_DBG("%s\n", __func__);
+
+    // defer_loading on an Anthropic tool must reach the OpenAI-shaped tool, so
+    // common_chat_tools_parse_oaicompat can flag it for the render path. Only
+    // emitted when true - ordinary tools convert byte-identical to before.
+    {
+        json input = json::parse(R"({
+            "model": "test-model",
+            "max_tokens": 100,
+            "tools": [
+                {
+                    "name": "get_weather",
+                    "description": "Get weather for a location",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "location": {"type": "string"}
+                        }
+                    }
+                },
+                {
+                    "name": "search_tools",
+                    "description": "Search the tool set",
+                    "defer_loading": true,
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"}
+                        }
+                    }
+                }
+            ],
+            "messages": [
+                {"role": "user", "content": "hi"}
+            ]
+        })");
+
+        json result = server_chat_convert_anthropic_to_oai(input);
+
+        assert_equals(true, result.contains("tools"));
+        assert_equals((size_t)2, result.at("tools").size());
+
+        const auto & visible = result.at("tools")[0];
+        assert_equals(std::string("get_weather"), visible.at("function").at("name").get<std::string>());
+        assert_equals(false, visible.at("function").contains("defer_loading"));
+
+        const auto & deferred = result.at("tools")[1];
+        assert_equals(std::string("search_tools"), deferred.at("function").at("name").get<std::string>());
+        assert_equals(true, deferred.at("function").at("defer_loading").get<bool>());
+    }
+
+    // a present non-bool defer_loading (including null) is a client error
+    // (400), not a silent default to false - matching /v1/chat/completions
+    // and the README.
+    {
+        for (const char * defer : { "\"yes\"", "null", "1" }) {
+            json input = json::parse(std::string(R"({
+                "model": "test-model",
+                "max_tokens": 100,
+                "tools": [
+                    {"name": "a", "description": "secret_marker", "defer_loading": )") + defer + R"(, "input_schema": {}}
+                ],
+                "messages": [
+                    {"role": "user", "content": "hi"}
+                ]
+            })");
+
+            bool threw = false;
+            try {
+                server_chat_convert_anthropic_to_oai(input);
+            } catch (const std::invalid_argument & e) {
+                threw = true;
+                std::string what = e.what();
+                if (what.find("defer_loading") == std::string::npos || what.find("secret_marker") != std::string::npos) {
+                    throw std::runtime_error(std::string("unexpected error message: ") + what);
+                }
+            }
+            assert_equals(true, threw);
+        }
+    }
+
+    // a tool_reference outside the documented scope (tool_result content or
+    // top-level user content) is a client error: reject with invalid_argument
+    // (HTTP 400) at the conversion layer, so it can never reach the OpenAI
+    // message list as an unknown part type (which would surface as a 500 from
+    // common_chat_msgs_parse_oaicompat when the body is applied).
+    for (const std::string role : { std::string("assistant"), std::string("system"), std::string("unknown_role") }) {
+        json input = json::parse(R"({
+            "model": "test-model",
+            "max_tokens": 100,
+            "tools": [
+                {"name": "get_weather", "input_schema": {}}
+            ],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_reference", "tool_name": "get_weather"}
+                    ]
+                }
+            ]
+        })");
+        input["messages"][0]["role"] = role;
+
+        bool threw = false;
+        try {
+            server_chat_convert_anthropic_to_oai(input);
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            std::string what = e.what();
+            if (what.find("tool_reference") == std::string::npos) {
+                throw std::runtime_error(std::string("unexpected error message: ") + what);
+            }
+        }
+        assert_equals(true, threw);
+    }
+
+    // Exercise the later parse step too: run the converted body of a
+    // legitimate request through oaicompat_chat_params_parse and confirm no
+    // unknown content part type survives conversion. The layer-only checks
+    // above cannot catch a raw tool_reference part slipping into the message
+    // list - only the parse (which would 500 on one) can.
+    {
+        json input = json::parse(R"({
+            "model": "test-model",
+            "max_tokens": 100,
+            "tools": [
+                {"name": "get_weather", "input_schema": {}}
+            ],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_reference", "tool_name": "get_weather"}
+                    ]
+                }
+            ]
+        })");
+
+        json converted = server_chat_convert_anthropic_to_oai(input);
+        server_chat_params opt;
+        opt.use_jinja = true;
+        opt.tmpls     = read_templates("models/templates/Qwen-Qwen3-0.6B.jinja");
+        std::vector<raw_buffer> out_files;
+        oaicompat_chat_params_parse(converted, opt, out_files);
+    }
+
+    // a reference inside the tool_result of a user turn is the documented
+    // real-world shape (the client echoes the tool-search results) and must
+    // keep expanding; the same block in a non-user message is outside the
+    // documented surface and is a 400, mirroring the top-level gate.
+    {
+        json input = json::parse(R"({
+            "model": "test-model",
+            "max_tokens": 100,
+            "tools": [
+                {"name": "get_weather", "input_schema": {}}
+            ],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {}}
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": [
+                                {"type": "tool_reference", "tool_name": "get_weather"}
+                            ]
+                        }
+                    ]
+                }
+            ]
+        })");
+        json result = server_chat_convert_anthropic_to_oai(input);
+
+        const json & msgs = result.at("messages");
+        bool expanded = false;
+        for (const auto & m : msgs) {
+            if (m.value("role", std::string()) == "tool" &&
+                m.value("content", std::string()).find("get_weather") != std::string::npos) {
+                expanded = true;
+            }
+        }
+        if (!expanded) {
+            throw std::runtime_error("tool_result reference in a user turn did not expand");
+        }
+
+        for (const std::string role : { std::string("assistant"), std::string("system"), std::string("unknown_role") }) {
+            json bad = input;
+            bad["messages"][1]["role"] = role;
+            bool threw = false;
+            try {
+                server_chat_convert_anthropic_to_oai(bad);
+            } catch (const std::invalid_argument & e) {
+                threw = true;
+                std::string what = e.what();
+                if (what.find("tool_reference") == std::string::npos) {
+                    throw std::runtime_error(std::string("unexpected error message: ") + what);
+                }
+            }
+            assert_equals(true, threw);
+        }
+    }
+}
+
+static void test_anthropic_tool_reference_expansion() {
+    LOG_DBG("%s\n", __func__);
+
+    const json tools = json::array({
+        json{
+            {"name", "tool_search"},
+            {"description", "Search the tool set"},
+            {"input_schema", json::object()},
+        },
+        json{
+            {"name", "get_weather"},
+            {"description", "Get the weather"},
+            {"defer_loading", true},
+            {"input_schema", {
+                {"type", "object"},
+                {"properties", {
+                    {"city", {{"type", "string"}}}
+                }}
+            }},
+        },
+        json{
+            {"name", "get_time"},
+            {"input_schema", json::object()},
+        },
+    });
+
+    const std::string weather_ref =
+        "<tool_reference name=\"get_weather\">\n"
+        "{\"name\":\"get_weather\",\"description\":\"Get the weather\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}}\n"
+        "</tool_reference>";
+
+    // Build a request whose single user message carries the given content array.
+    auto make_input = [](const json & content, const json & req_tools) {
+        return json{
+            {"model", "test-model"},
+            {"max_tokens", 100},
+            {"tools", req_tools},
+            {"messages", json::array({
+                json{{"role", "user"}, {"content", content}},
+            })},
+        };
+    };
+
+    // 1. a reference inside a tool_result expands into the definition as text;
+    //    surrounding text keeps a blank line on each side of the definition.
+    {
+        json input = json::parse(R"({
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": "tool_search",
+                            "input": {"query": "select:get_weather"}
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": [
+                                {"type": "text", "text": "1 match"},
+                                {"type": "tool_reference", "tool_name": "get_weather"}
+                            ]
+                        }
+                    ]
+                }
+            ]
+        })");
+        input["tools"] = tools;
+
+        json result = server_chat_convert_anthropic_to_oai(input);
+
+        // input order is preserved: assistant tool_calls first, then the tool message
+        const json & msgs = result.at("messages");
+        assert_equals((size_t)2, msgs.size());
+        assert_equals(std::string("assistant"), msgs[0].at("role").get<std::string>());
+        assert_equals(std::string("tool"), msgs[1].at("role").get<std::string>());
+        assert_equals(std::string("1 match\n\n") + weather_ref, msgs[1].at("content").get<std::string>());
+    }
+
+    // 2. references back to back in a tool_result get one blank line between
+    //    each pair.
+    {
+        auto result = server_chat_convert_anthropic_to_oai(make_input(json::array({
+            json{{"type", "tool_result"}, {"tool_use_id", "toolu_1"}, {"content", json::array({
+                json{{"type", "tool_reference"}, {"tool_name", "get_weather"}},
+                json{{"type", "tool_reference"}, {"tool_name", "get_time"}},
+            })}},
+        }), tools));
+
+        const json & msgs = result.at("messages");
+        assert_equals((size_t)1, msgs.size());
+        assert_equals(std::string("tool"), msgs[0].at("role").get<std::string>());
+        assert_equals(weather_ref + "\n\n" +
+                      "<tool_reference name=\"get_time\">\n"
+                      "{\"name\":\"get_time\",\"description\":\"\",\"parameters\":{}}\n"
+                      "</tool_reference>",
+                      msgs[0].at("content").get<std::string>());
+    }
+
+    // 3. a reference at the top level of user content expands too, with the
+    //    blank line riding on the following text part.
+    {
+        auto result = server_chat_convert_anthropic_to_oai(make_input(json::array({
+            json{{"type", "tool_reference"}, {"tool_name", "get_weather"}},
+            json{{"type", "text"}, {"text", "weather in Paris?"}},
+        }), tools));
+
+        const json & msgs = result.at("messages");
+        assert_equals((size_t)1, msgs.size());
+        assert_equals(std::string("user"), msgs[0].at("role").get<std::string>());
+        const json & parts = msgs[0].at("content");
+        assert_equals((size_t)2, parts.size());
+        assert_equals(weather_ref, parts[0].at("text").get<std::string>());
+        assert_equals(std::string("\n\nweather in Paris?"), parts[1].at("text").get<std::string>());
+    }
+
+    // 4. a text block without a text member must convert as empty text, so the
+    //    reference after it still finds a text part to hang its separator on.
+    {
+        auto result = server_chat_convert_anthropic_to_oai(make_input(json::array({
+            json{{"type", "text"}},
+            json{{"type", "tool_reference"}, {"tool_name", "get_weather"}},
+        }), tools));
+
+        const json & parts = result.at("messages")[0].at("content");
+        assert_equals((size_t)2, parts.size());
+        // the blank line rides on the empty text part before the reference
+        assert_equals(std::string("\n\n"), parts[0].at("text").get<std::string>());
+        assert_equals(weather_ref, parts[1].at("text").get<std::string>());
+    }
+
+    // 5. a reference that follows an image inside a tool_result must not crash
+    //    on the image part; the blank line goes on its own part before the
+    //    definition.
+    {
+        auto result = server_chat_convert_anthropic_to_oai(make_input(json::array({
+            json{{"type", "tool_result"}, {"tool_use_id", "toolu_1"}, {"content", json::array({
+                json{{"type", "image"}, {"source", {{"type", "url"}, {"url", "https://example.com/x.png"}}}},
+                json{{"type", "tool_reference"}, {"tool_name", "get_weather"}},
+            })}},
+        }), tools));
+
+        const json & parts = result.at("messages")[0].at("content");
+        assert_equals((size_t)3, parts.size());
+        assert_equals(std::string("image_url"), parts[0].at("type").get<std::string>());
+        assert_equals(std::string("\n\n"), parts[1].at("text").get<std::string>());
+        assert_equals(weather_ref, parts[2].at("text").get<std::string>());
+    }
+
+    // 6. a reference to a name not in tools is a 400, and the echoed name in
+    //    the error is bounded and stripped of control characters, so it can
+    //    neither bloat the 400 body and log nor forge log lines.
+    {
+        json input = make_input(json::array({
+            json{{"type", "tool_reference"}, {"tool_name", "no_such_tool"}},
+        }), tools);
+
+        bool threw = false;
+        try {
+            server_chat_convert_anthropic_to_oai(input);
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            assert_equals(std::string("Tool reference 'no_such_tool' not found in available tools"), std::string(e.what()));
+        }
+        assert_equals(true, threw);
+
+        // the last name places a two-byte sequence exactly across the 64-byte
+        // cut, so byte-wise truncation would emit a partial UTF-8 sequence
+        for (const std::string & name : { std::string(128, 'x'), std::string("bad\ninjected log line"),
+                                          std::string("caf\xc3\xa9\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e"),
+                                          std::string(63, 'z') + "\xc3\xa9" }) {
+            input["messages"][0]["content"][0]["tool_name"] = name;
+            threw = false;
+            try {
+                server_chat_convert_anthropic_to_oai(input);
+            } catch (const std::invalid_argument & e) {
+                threw = true;
+                std::string what = e.what();
+                if (what.size() > 128) {
+                    throw std::runtime_error("error message echoes an unbounded tool_name");
+                }
+                // a name longer than the echo bound must not come back whole
+                if (name.size() > 64 && what.find(name) != std::string::npos) {
+                    throw std::runtime_error("error message echoes the full untruncated tool_name");
+                }
+                for (const char ch : what) {
+                    if (static_cast<unsigned char>(ch) < 0x20 || static_cast<unsigned char>(ch) == 0x7f) {
+                        throw std::runtime_error("error message contains control characters - log injection");
+                    }
+                }
+                // the echoed name must stay valid UTF-8: no truncated multi-byte
+                // sequence may reach the 400 body (dump_safe currently masks
+                // this, but the message itself must be well-formed)
+                if (name.size() > 64) {
+                    std::string marker = "Tool reference '";
+                    size_t start = what.find(marker);
+                    size_t end = what.find("' not found in available tools");
+                    if (start != std::string::npos && end != std::string::npos) {
+                        std::string echoed = what.substr(start + marker.size(), end - start - marker.size());
+                        size_t offset = 0;
+                        bool ok = true;
+                        while (offset < echoed.size()) {
+                            const unsigned char c = echoed[offset];
+                            int expected = (c >= 0xF0) ? 4 : (c >= 0xE0) ? 3 : (c >= 0xC0) ? 2 : 1;
+                            if ((c & 0xC0) == 0x80 || offset + expected > echoed.size()) {
+                                ok = false;
+                                break;
+                            }
+                            for (int k = 1; k < expected; ++k) {
+                                if ((echoed[offset + k] & 0xC0) != 0x80) {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                            if (!ok) {
+                                break;
+                            }
+                            offset += expected;
+                        }
+                        if (!ok) {
+                            throw std::runtime_error("error message contains a truncated UTF-8 sequence");
+                        }
+                    }
+                }
+            }
+            assert_equals(true, threw);
+        }
+    }
+
+    // 7. a missing or empty tool_name is treated as an unknown reference (400),
+    //    not as a match against a tool that itself has no name.
+    {
+        json input = make_input(json::array({
+            json{{"type", "tool_reference"}},
+        }), json::array({
+            json{{"description", "unnamed tool"}, {"input_schema", json::object()}},
+        }));
+
+        bool threw = false;
+        try {
+            server_chat_convert_anthropic_to_oai(input);
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            assert_equals(std::string("Tool reference '' not found in available tools"), std::string(e.what()));
+        }
+        assert_equals(true, threw);
+    }
+
+    // 8. expansion is capped: many references must not multiply into a huge
+    //    converted body (a memory amplification vector on /v1/messages and,
+    //    cheaper for an attacker, /v1/messages/count_tokens).
+    {
+        const std::string schema(1024, 'p'); // a chunky input_schema
+        json big_tools = json::array({
+            json{
+                {"name", "big_tool"},
+                {"description", "Big tool"},
+                {"input_schema", {{"type", "object"}, {"description", schema}}},
+            },
+        });
+        json content = json::array();
+        for (int i = 0; i < 1024; ++i) {
+            content.push_back(json{{"type", "tool_reference"}, {"tool_name", "big_tool"}});
+        }
+
+        bool threw = false;
+        try {
+            server_chat_convert_anthropic_to_oai(make_input(content, big_tools));
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            std::string what = e.what();
+            if (what.find("tool_reference") == std::string::npos) {
+                throw std::runtime_error(std::string("unexpected cap error message: ") + what);
+            }
+        }
+        assert_equals(true, threw);
+    }
+
+    // 9. total expansion bytes are capped too: the count cap alone still lets a
+    //    few references to a multi-megabyte tool render a huge converted body
+    //    (amplification only scales with the cap, not away).
+    {
+        const std::string schema(4 * 1024 * 1024, 'q'); // a 4 MB input_schema
+        json big_tools = json::array({
+            json{
+                {"name", "big_tool"},
+                {"description", "Big tool"},
+                {"input_schema", {{"type", "object"}, {"description", schema}}},
+            },
+        });
+        // well under the count cap: amplification must be bounded by bytes,
+        // not by how few references it takes to exceed them
+        json content = json::array();
+        for (int i = 0; i < 64; ++i) {
+            content.push_back(json{{"type", "tool_reference"}, {"tool_name", "big_tool"}});
+        }
+
+        bool threw = false;
+        try {
+            server_chat_convert_anthropic_to_oai(make_input(content, big_tools));
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            std::string what = e.what();
+            if (what.find("tool_reference") == std::string::npos) {
+                throw std::runtime_error(std::string("unexpected budget error message: ") + what);
+            }
+        }
+        assert_equals(true, threw);
+    }
+
+    // 10. a mid-size schema under the count cap must also trip the byte
+    //     budget: 128 references to a 100 KB tool expand to 12.8 MB from a
+    //     ~106 KB request (roughly the original x128 amplification).
+    {
+        const std::string schema(100 * 1024, 'r');
+        json big_tools = json::array({
+            json{
+                {"name", "big_tool"},
+                {"description", "Big tool"},
+                {"input_schema", {{"type", "object"}, {"description", schema}}},
+            },
+        });
+        json content = json::array();
+        for (int i = 0; i < 128; ++i) {
+            content.push_back(json{{"type", "tool_reference"}, {"tool_name", "big_tool"}});
+        }
+
+        bool threw = false;
+        try {
+            server_chat_convert_anthropic_to_oai(make_input(content, big_tools));
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            std::string what = e.what();
+            if (what.find("tool_reference") == std::string::npos) {
+                throw std::runtime_error(std::string("unexpected budget error message: ") + what);
+            }
+        }
+        assert_equals(true, threw);
     }
 }
 
@@ -7324,7 +8008,10 @@ int main(int argc, char ** argv) {
         test_msgs_oaicompat_json_conversion();
         test_msg_token_delimiters_split();
         test_tools_oaicompat_json_conversion();
+        test_tool_defer_loading();
         test_convert_responses_to_chatcmpl();
+        test_anthropic_tool_conversion();
+        test_anthropic_tool_reference_expansion();
         test_developer_role_to_system_workaround();
         test_deepseek_v4_thinking_retention();
         test_deepseek_v4_tool_result_ordering();

@@ -257,6 +257,81 @@ def test_anthropic_count_tokens_no_max_tokens():
     assert "input_tokens" in res.body
 
 
+def test_anthropic_tool_reference_count_tokens():
+    """count_tokens must see the expanded tool_reference, not the dropped block.
+
+    The token count for a conversation with a tool_reference must be higher than
+    the same conversation with the reference stripped, because the expansion
+    renders the tool definition inline.
+    """
+    server.jinja = True
+    server.chat_template_file = '../../../models/templates/Qwen-Qwen3-0.6B.jinja'
+    server.start()
+
+    tools = [{
+        "name": "tool_search",
+        "description": "Search the tool set",
+        "input_schema": {"type": "object"},
+    }, {
+        "name": "get_weather",
+        "description": "Get the current weather in a location",
+        "defer_loading": True,
+        "input_schema": {
+            "type": "object",
+            "properties": {"location": {"type": "string"}},
+            "required": ["location"]
+        }
+    }]
+
+    messages = [
+        {"role": "user", "content": "What's the weather in Paris?"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "call_1", "name": "tool_search",
+                 "input": {"query": "select:get_weather"}}
+            ]
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_1",
+                    "content": [
+                        {"type": "text", "text": "1 match"},
+                        {"type": "tool_reference", "tool_name": "get_weather"}
+                    ]
+                }
+            ]
+        },
+    ]
+
+    res = server.make_request("POST", "/v1/messages/count_tokens", data={
+        "model": "test",
+        "messages": messages,
+        "tools": tools,
+    })
+    assert res.status_code == 200, f"Expected 200: {res.body}"
+    tokens_with_reference = res.body["input_tokens"]
+
+    # Same request with the reference removed must count fewer tokens.
+    stripped = json.loads(json.dumps(messages))
+    stripped[2]["content"][0]["content"] = [
+        {"type": "text", "text": "1 match"}
+    ]
+    res_stripped = server.make_request("POST", "/v1/messages/count_tokens", data={
+        "model": "test",
+        "messages": stripped,
+        "tools": tools,
+    })
+    assert res_stripped.status_code == 200, f"Expected 200: {res_stripped.body}"
+    tokens_stripped = res_stripped.body["input_tokens"]
+
+    assert tokens_with_reference > tokens_stripped, \
+        f"Expected expansion to add tokens ({tokens_with_reference} <= {tokens_stripped})"
+
+
 # Tool use tests
 
 def test_anthropic_tool_use_basic():
