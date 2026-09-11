@@ -1622,6 +1622,8 @@ A user or `tool_result` content block of type `tool_reference` expands to a text
 
 `tool_reference` blocks are accepted inside a `tool_result` content array and at the top level of user content. A `tool_name` that is missing, empty, or does not match a declared tool is an invalid request (HTTP 400), as is a tool list that is entirely deferred.
 
+Expansion is limited per request to 128 references and to 1 MB of rendered definitions in total. Exceeding either limit is an invalid request (HTTP 400).
+
 *Examples:*
 
 ```shell
