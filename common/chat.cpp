@@ -597,11 +597,14 @@ std::vector<common_chat_tool> common_chat_tools_parse_oaicompat(const json & too
             if (!type.is_string() || type != "function") {
                 throw std::invalid_argument("Unsupported tool type (expected \"function\")");
             }
-            if (!tool.contains("function")) {
-                throw std::invalid_argument("Missing tool function in tools entry");
+            if (!tool.contains("function") || !tool.at("function").is_object()) {
+                throw std::invalid_argument("Tool entry must have a function object");
             }
 
             const auto & function = tool.at("function");
+            if (!function.contains("name") || !function.at("name").is_string()) {
+                throw std::invalid_argument("Tool function must have a string name");
+            }
             // Accept the flag on the tool object or inside "function" -
             // clients differ on where they put it. Absent means false; a
             // present non-bool is a client error, not a silent default.

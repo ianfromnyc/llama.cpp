@@ -1942,6 +1942,25 @@ static void test_tool_defer_loading() {
             throw std::runtime_error("expected an error for non-array tools");
         }
     }
+
+    // 8. a tool whose function lacks a usable name is a 400-shaped client
+    //    error, not a bare json out_of_range (500).
+    {
+        json tools = json::parse(R"([
+            {"type": "function", "function": {"description": "no name"}}
+        ])");
+        bool threw = false;
+        try {
+            common_chat_tools_parse_oaicompat(tools);
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            assert_equals(std::string("Tool function must have a string name"),
+                          std::string(e.what()));
+        }
+        if (!threw) {
+            throw std::runtime_error("expected an error for a tool without a name");
+        }
+    }
 }
 
 static void test_convert_responses_to_chatcmpl() {
