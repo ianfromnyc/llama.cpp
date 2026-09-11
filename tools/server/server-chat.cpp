@@ -638,9 +638,10 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
                 {"description", json_value(tool, "description", std::string())},
                 {"parameters", tool.contains("input_schema") ? tool.at("input_schema") : json::object()}
             };
-            // A present non-bool is a client error, not a silent default -
-            // same rule as common_chat_tools_parse_oaicompat.
-            if (tool.contains("defer_loading") && !tool.at("defer_loading").is_null()) {
+            // A present defer_loading must be a boolean - null, numbers and
+            // strings are client errors, not silent defaults, exactly as in
+            // common_chat_tools_parse_oaicompat.
+            if (tool.contains("defer_loading")) {
                 if (!tool.at("defer_loading").is_boolean()) {
                     throw std::invalid_argument("defer_loading must be a boolean");
                 }

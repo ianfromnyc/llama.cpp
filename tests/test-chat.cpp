@@ -2150,31 +2150,34 @@ static void test_anthropic_tool_conversion() {
         assert_equals(true, deferred.at("function").at("defer_loading").get<bool>());
     }
 
-    // a present non-bool defer_loading is a client error (400), not a silent
-    // default to false - matching /v1/chat/completions and the README.
+    // a present non-bool defer_loading (including null) is a client error
+    // (400), not a silent default to false - matching /v1/chat/completions
+    // and the README.
     {
-        json input = json::parse(R"({
-            "model": "test-model",
-            "max_tokens": 100,
-            "tools": [
-                {"name": "a", "description": "secret_marker", "defer_loading": "yes", "input_schema": {}}
-            ],
-            "messages": [
-                {"role": "user", "content": "hi"}
-            ]
-        })");
+        for (const char * defer : { "\"yes\"", "null", "1" }) {
+            json input = json::parse(std::string(R"({
+                "model": "test-model",
+                "max_tokens": 100,
+                "tools": [
+                    {"name": "a", "description": "secret_marker", "defer_loading": )") + defer + R"(, "input_schema": {}}
+                ],
+                "messages": [
+                    {"role": "user", "content": "hi"}
+                ]
+            })");
 
-        bool threw = false;
-        try {
-            server_chat_convert_anthropic_to_oai(input);
-        } catch (const std::invalid_argument & e) {
-            threw = true;
-            std::string what = e.what();
-            if (what.find("defer_loading") == std::string::npos || what.find("secret_marker") != std::string::npos) {
-                throw std::runtime_error(std::string("unexpected error message: ") + what);
+            bool threw = false;
+            try {
+                server_chat_convert_anthropic_to_oai(input);
+            } catch (const std::invalid_argument & e) {
+                threw = true;
+                std::string what = e.what();
+                if (what.find("defer_loading") == std::string::npos || what.find("secret_marker") != std::string::npos) {
+                    throw std::runtime_error(std::string("unexpected error message: ") + what);
+                }
             }
+            assert_equals(true, threw);
         }
-        assert_equals(true, threw);
     }
 
     // a tool_reference outside the documented scope (tool_result content or
