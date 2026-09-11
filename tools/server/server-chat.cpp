@@ -351,7 +351,7 @@ static json anthropic_tool_reference_to_text(const std::string & name, const jso
     throw std::invalid_argument("Tool reference '" + name + "' not found in available tools");
 }
 
-// Append a tool_reference block to a part array as the text part that carries the tool's definition, separating it from its neighbours with a blank line: the blank line rides on the preceding text part, or on its own part when the neighbour is not text (e.g. an image part).
+// Append a tool_reference block to a part array as the text part that carries the tool's definition. A blank line separates it from its neighbours: it rides on the preceding text part, or on its own part when the neighbour is not text (e.g. an image part).
 static void anthropic_append_reference(json & parts, const json & block, const json & tools) {
     json ref = anthropic_tool_reference_to_text(json_value(block, "tool_name", std::string()), tools);
     if (!parts.empty() && json_value(parts.back(), "type", std::string()) == "text") {
@@ -477,8 +477,7 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
                 std::string type = json_value(block, "type", std::string());
 
                 if (type == "text") {
-                    // normalize: a raw block is stored verbatim and may lack
-                    // the text member entirely
+                    // a raw block is stored verbatim and may lack the text member entirely
                     json norm = {
                         {"type", "text"},
                         {"text", pending_ref_sep + json_value(block, "text", std::string())}
