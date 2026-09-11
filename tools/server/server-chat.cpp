@@ -378,10 +378,8 @@ static json anthropic_tool_reference_to_text(const std::string & name, const jso
     throw std::invalid_argument("Tool reference '" + quoted + "' not found in available tools");
 }
 
-// Append a tool_reference block to a part array as the text part that carries
-// the tool's definition. A blank line separates it from its neighbours: it
-// rides on the preceding text part, or on its own part when the neighbour is
-// not text (e.g. an image part).
+// Append a tool_reference block as the text part carrying the tool's
+// definition, separated from its neighbours by a blank line.
 static void anthropic_append_reference(json & parts, const json & block, const json & tools, size_t & expanded_refs) {
     json ref = anthropic_tool_reference_to_text(json_value(block, "tool_name", std::string()), tools, expanded_refs);
     if (!parts.empty() && json_value(parts.back(), "type", std::string()) == "text") {
