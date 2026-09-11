@@ -2149,6 +2149,33 @@ static void test_anthropic_tool_conversion() {
         assert_equals(std::string("search_tools"), deferred.at("function").at("name").get<std::string>());
         assert_equals(true, deferred.at("function").at("defer_loading").get<bool>());
     }
+
+    // a present non-bool defer_loading is a client error (400), not a silent
+    // default to false - matching /v1/chat/completions and the README.
+    {
+        json input = json::parse(R"({
+            "model": "test-model",
+            "max_tokens": 100,
+            "tools": [
+                {"name": "a", "description": "secret_marker", "defer_loading": "yes", "input_schema": {}}
+            ],
+            "messages": [
+                {"role": "user", "content": "hi"}
+            ]
+        })");
+
+        bool threw = false;
+        try {
+            server_chat_convert_anthropic_to_oai(input);
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            std::string what = e.what();
+            if (what.find("defer_loading") == std::string::npos || what.find("secret_marker") != std::string::npos) {
+                throw std::runtime_error(std::string("unexpected error message: ") + what);
+            }
+        }
+        assert_equals(true, threw);
+    }
 }
 
 static void test_anthropic_tool_reference_expansion() {
