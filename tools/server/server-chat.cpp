@@ -351,6 +351,22 @@ static json anthropic_tool_reference_to_text(const std::string & name, const jso
     throw std::invalid_argument("Tool reference '" + name + "' not found in available tools");
 }
 
+// Append a tool_reference block to a part array as the text part that carries
+// the tool's definition, separating it from its neighbours with a blank line.
+// The blank line rides on the preceding text part, or on its own part when the
+// neighbour is not text (e.g. an image part). pending_sep then opens the next
+// text part with a blank line.
+static void anthropic_append_reference(json & parts, const json & block, const json & tools, std::string & pending_sep) {
+    json ref = anthropic_tool_reference_to_text(json_value(block, "tool_name", std::string()), tools);
+    if (!parts.empty() && json_value(parts.back(), "type", std::string()) == "text") {
+        parts.back()["text"] = json_value(parts.back(), "text", std::string()) + "\n\n";
+    } else if (!parts.empty()) {
+        parts.push_back({{"type", "text"}, {"text", "\n\n"}});
+    }
+    parts.push_back(ref);
+    pending_sep = "\n\n";
+}
+
 // Expand tool_reference blocks in a tool_result content array into text parts.
 // Separates a reference from its neighbours with a blank line, so the rendered
 // prompt never runs the definition into adjacent text or a second reference.
@@ -360,17 +376,7 @@ static json anthropic_expand_references_in_result(const json & result_content, c
     for (const auto & c : result_content) {
         std::string c_type = json_value(c, "type", std::string());
         if (c_type == "tool_reference") {
-            std::string name = json_value(c, "tool_name", std::string());
-            json ref = anthropic_tool_reference_to_text(name, tools);
-            // The blank line rides on the text before the reference, or on its
-            // own part when the neighbour is not text (e.g. an image part).
-            if (!parts.empty() && json_value(parts.back(), "type", std::string()) == "text") {
-                parts.back()["text"] = json_value(parts.back(), "text", std::string()) + "\n\n";
-            } else if (!parts.empty()) {
-                parts.push_back({{"type", "text"}, {"text", "\n\n"}});
-            }
-            parts.push_back(ref);
-            pending_sep = "\n\n";
+            anthropic_append_reference(parts, c, tools, pending_sep);
         } else if (c_type == "text") {
             std::string text = json_value(c, "text", std::string());
             parts.push_back({
@@ -469,7 +475,7 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
             std::string reasoning_content;
             bool has_tool_calls = false;
             // set after a tool_reference: the next text part opens with a blank line
-            bool pending_ref_sep = false;
+            std::string pending_ref_sep;
 
             for (const auto & block : content) {
                 std::string type = json_value(block, "type", std::string());
@@ -479,23 +485,13 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
                     // the text member entirely
                     json norm = {
                         {"type", "text"},
-                        {"text", json_value(block, "text", std::string())}
+                        {"text", pending_ref_sep + json_value(block, "text", std::string())}
                     };
-                    if (pending_ref_sep) {
-                        norm["text"] = "\n\n" + json_value(norm, "text", std::string());
-                        pending_ref_sep = false;
-                    }
+                    pending_ref_sep.clear();
                     converted_content.push_back(norm);
                 } else if (type == "tool_reference") {
                     // The API allows a reference outside a tool result too.
-                    json ref = anthropic_tool_reference_to_text(json_value(block, "tool_name", std::string()), tools);
-                    if (!converted_content.empty() && json_value(converted_content.back(), "type", std::string()) == "text") {
-                        converted_content.back()["text"] = json_value(converted_content.back(), "text", std::string()) + "\n\n";
-                    } else if (!converted_content.empty()) {
-                        converted_content.push_back({{"type", "text"}, {"text", "\n\n"}});
-                    }
-                    converted_content.push_back(ref);
-                    pending_ref_sep = true;
+                    anthropic_append_reference(converted_content, block, tools, pending_ref_sep);
                 } else if (type == "thinking") {
                     reasoning_content += json_value(block, "thinking", std::string());
                 } else if (type == "image") {
