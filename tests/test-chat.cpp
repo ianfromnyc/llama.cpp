@@ -2185,48 +2185,65 @@ static void test_anthropic_tool_conversion() {
     // (HTTP 400) at the conversion layer, so it can never reach the OpenAI
     // message list as an unknown part type (which would surface as a 500 from
     // common_chat_msgs_parse_oaicompat when the body is applied).
-    {
-        for (const std::string role : { std::string("assistant"), std::string("system"), std::string("unknown_role") }) {
-            json input = json::parse(R"({
-                "model": "test-model",
-                "max_tokens": 100,
-                "tools": [
-                    {"name": "get_weather", "input_schema": {}}
-                ],
-                "messages": [
-                    {
-                        "role": "assistant",
-                        "content": [
-                            {"type": "tool_reference", "tool_name": "get_weather"}
-                        ]
-                    }
-                ]
-            })");
-            input["messages"][0]["role"] = role;
-
-            bool threw = false;
-            try {
-                server_chat_convert_anthropic_to_oai(input);
-            } catch (const std::invalid_argument & e) {
-                threw = true;
-                std::string what = e.what();
-                if (what.find("tool_reference") == std::string::npos) {
-                    throw std::runtime_error(std::string("unexpected error message: ") + what);
+    for (const std::string role : { std::string("assistant"), std::string("system"), std::string("unknown_role") }) {
+        json input = json::parse(R"({
+            "model": "test-model",
+            "max_tokens": 100,
+            "tools": [
+                {"name": "get_weather", "input_schema": {}}
+            ],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_reference", "tool_name": "get_weather"}
+                    ]
                 }
-            }
-            assert_equals(true, threw);
+            ]
+        })");
+        input["messages"][0]["role"] = role;
 
-            // Exercise the full server path: the converted body must be
-            // accepted by oaicompat_chat_params_parse whenever conversion
-            // succeeds - a misplaced block must never get that far.
-            if (!threw) {
-                server_chat_params opt;
-                opt.use_jinja = false;
-                std::vector<raw_buffer> out_files;
-                oaicompat_chat_params_parse(input, opt, out_files);
-                throw std::runtime_error("misplaced tool_reference passed params parse (would be a 500)");
+        bool threw = false;
+        try {
+            server_chat_convert_anthropic_to_oai(input);
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            std::string what = e.what();
+            if (what.find("tool_reference") == std::string::npos) {
+                throw std::runtime_error(std::string("unexpected error message: ") + what);
             }
         }
+        assert_equals(true, threw);
+    }
+
+    // Exercise the later parse step too: run the converted body of a
+    // legitimate request through oaicompat_chat_params_parse and confirm no
+    // unknown content part type survives conversion. The layer-only checks
+    // above cannot catch a raw tool_reference part slipping into the message
+    // list - only the parse (which would 500 on one) can.
+    {
+        json input = json::parse(R"({
+            "model": "test-model",
+            "max_tokens": 100,
+            "tools": [
+                {"name": "get_weather", "input_schema": {}}
+            ],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_reference", "tool_name": "get_weather"}
+                    ]
+                }
+            ]
+        })");
+
+        json converted = server_chat_convert_anthropic_to_oai(input);
+        server_chat_params opt;
+        opt.use_jinja = true;
+        opt.tmpls     = read_templates("models/templates/Qwen-Qwen3-0.6B.jinja");
+        std::vector<raw_buffer> out_files;
+        oaicompat_chat_params_parse(converted, opt, out_files);
     }
 }
 
