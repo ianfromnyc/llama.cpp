@@ -353,7 +353,19 @@ static json anthropic_tool_reference_to_text(const std::string & name, const jso
             return part;
         }
     }
-    throw std::invalid_argument("Tool reference '" + name + "' not found in available tools");
+    // The name is client input: bound it and strip control characters so the
+    // 400 body (and the server log, which repeats it) cannot be flooded or
+    // have forged lines injected via embedded newlines.
+    std::string quoted;
+    for (size_t i = 0; i < name.size() && quoted.size() < 64; ++i) {
+        const unsigned char ch = name[i];
+        if (ch >= 0x20 && ch != 0x7f) {
+            quoted += ch;
+        } else if (ch == '\n' || ch == '\r') {
+            quoted += "\\n";
+        }
+    }
+    throw std::invalid_argument("Tool reference '" + quoted + "' not found in available tools");
 }
 
 // Append a tool_reference block to a part array as the text part that carries the tool's definition. A blank line separates it from its neighbours: it rides on the preceding text part, or on its own part when the neighbour is not text (e.g. an image part).

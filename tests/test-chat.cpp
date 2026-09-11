@@ -2322,7 +2322,9 @@ static void test_anthropic_tool_reference_expansion() {
                       parts[1].at("text").get<std::string>());
     }
 
-    // 4. a reference to a name not in tools is a 400.
+    // 4. a reference to a name not in tools is a 400, and the echoed name in
+    //    the error is bounded and stripped of control characters, so it can
+    //    neither bloat the 400 body and log nor forge log lines.
     {
         json input = json::parse(R"({
             "model": "test-model",
@@ -2346,6 +2348,29 @@ static void test_anthropic_tool_reference_expansion() {
             assert_equals(std::string("Tool reference 'no_such_tool' not found in available tools"), std::string(e.what()));
         }
         assert_equals(true, threw);
+
+        for (const std::string & name : { std::string(128, 'x'), std::string("bad\ninjected log line") }) {
+            input["messages"][0]["content"][0]["tool_name"] = name;
+            threw = false;
+            try {
+                server_chat_convert_anthropic_to_oai(input);
+            } catch (const std::invalid_argument & e) {
+                threw = true;
+                std::string what = e.what();
+                if (what.size() > 128) {
+                    throw std::runtime_error("error message echoes an unbounded tool_name");
+                }
+                if (what.find(name) != std::string::npos) {
+                    throw std::runtime_error("error message echoes the full untruncated tool_name");
+                }
+                for (const char ch : what) {
+                    if (static_cast<unsigned char>(ch) < 0x20 || static_cast<unsigned char>(ch) == 0x7f) {
+                        throw std::runtime_error("error message contains control characters - log injection");
+                    }
+                }
+            }
+            assert_equals(true, threw);
+        }
     }
 
     // 5. a reference that follows an image must not crash on the image part;
