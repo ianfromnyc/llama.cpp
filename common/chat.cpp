@@ -603,9 +603,15 @@ std::vector<common_chat_tool> common_chat_tools_parse_oaicompat(const json & too
 
             const auto & function = tool.at("function");
             // Accept the flag on the tool object or inside "function" -
-            // clients differ on where they put it.
-            const bool defer = tool.value("defer_loading", false) ||
-                               function.value("defer_loading", false);
+            // clients differ on where they put it. Absent means false; a
+            // present non-bool is a client error, not a silent default.
+            const json * tool_defer = tool.contains("defer_loading") ? &tool.at("defer_loading") : nullptr;
+            const json * func_defer = function.contains("defer_loading") ? &function.at("defer_loading") : nullptr;
+            if ((tool_defer && !tool_defer->is_boolean()) || (func_defer && !func_defer->is_boolean())) {
+                throw std::invalid_argument("defer_loading must be a boolean");
+            }
+            const bool defer = (tool_defer && tool_defer->get<bool>()) ||
+                               (func_defer && func_defer->get<bool>());
             result.push_back({
                 /* .name = */ function.at("name"),
                 /* .description = */ function.value("description", ""),

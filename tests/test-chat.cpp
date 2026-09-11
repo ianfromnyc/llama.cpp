@@ -1902,6 +1902,26 @@ static void test_tool_defer_loading() {
             throw std::runtime_error("expected an error for an unsupported tool type");
         }
     }
+
+    // 6. a non-bool defer_loading is a client error: reject with a 400-shaped
+    //    invalid_argument instead of a json type error (500).
+    {
+        json tools = json::parse(R"([
+            {"type": "function", "defer_loading": 1,
+             "function": {"name": "f", "parameters": {}}}
+        ])");
+        bool threw = false;
+        try {
+            common_chat_tools_parse_oaicompat(tools);
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            assert_equals(std::string("defer_loading must be a boolean"),
+                          std::string(e.what()));
+        }
+        if (!threw) {
+            throw std::runtime_error("expected an error for a non-bool defer_loading");
+        }
+    }
 }
 
 static void test_convert_responses_to_chatcmpl() {
