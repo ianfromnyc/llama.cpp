@@ -587,18 +587,18 @@ std::vector<common_chat_tool> common_chat_tools_parse_oaicompat(const json & too
 
     if (!tools.is_null()) {
         if (!tools.is_array()) {
-            throw std::invalid_argument("Expected 'tools' to be an array, got " + tools.dump());
+            throw std::invalid_argument("Expected 'tools' to be an array");
         }
         for (const auto & tool : tools) {
             if (!tool.contains("type")) {
-                throw std::invalid_argument("Missing tool type: " + tool.dump());
+                throw std::invalid_argument("Missing tool type in tools entry");
             }
             const auto & type = tool.at("type");
             if (!type.is_string() || type != "function") {
-                throw std::invalid_argument("Unsupported tool type: " + tool.dump());
+                throw std::invalid_argument("Unsupported tool type (expected \"function\")");
             }
             if (!tool.contains("function")) {
-                throw std::invalid_argument("Missing tool function: " + tool.dump());
+                throw std::invalid_argument("Missing tool function in tools entry");
             }
 
             const auto & function = tool.at("function");

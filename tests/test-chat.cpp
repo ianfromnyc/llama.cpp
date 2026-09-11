@@ -1922,6 +1922,26 @@ static void test_tool_defer_loading() {
             throw std::runtime_error("expected an error for a non-bool defer_loading");
         }
     }
+
+    // 7. a non-array tools value is rejected without echoing the payload:
+    //    the message names the problem, it does not repeat the input.
+    {
+        json bad = json::parse(R"({"type": "bogus", "secret_marker": "x"})");
+        bool threw = false;
+        try {
+            common_chat_tools_parse_oaicompat(bad);
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            std::string what = e.what();
+            if (what.find("secret_marker") != std::string::npos ||
+                what.find("Expected 'tools' to be an array") == std::string::npos) {
+                throw std::runtime_error(std::string("unexpected parse error message: ") + what);
+            }
+        }
+        if (!threw) {
+            throw std::runtime_error("expected an error for non-array tools");
+        }
+    }
 }
 
 static void test_convert_responses_to_chatcmpl() {
