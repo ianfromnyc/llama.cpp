@@ -2548,6 +2548,36 @@ static void test_anthropic_tool_reference_expansion() {
         }
         assert_equals(true, threw);
     }
+
+    // 10. a mid-size schema under the count cap must also trip the byte
+    //     budget: 128 references to a 100 KB tool expand to 12.8 MB from a
+    //     ~106 KB request (roughly the original x128 amplification).
+    {
+        const std::string schema(100 * 1024, 'r');
+        json big_tools = json::array({
+            json{
+                {"name", "big_tool"},
+                {"description", "Big tool"},
+                {"input_schema", {{"type", "object"}, {"description", schema}}},
+            },
+        });
+        json content = json::array();
+        for (int i = 0; i < 128; ++i) {
+            content.push_back(json{{"type", "tool_reference"}, {"tool_name", "big_tool"}});
+        }
+
+        bool threw = false;
+        try {
+            server_chat_convert_anthropic_to_oai(make_input(content, big_tools));
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            std::string what = e.what();
+            if (what.find("tool_reference") == std::string::npos) {
+                throw std::runtime_error(std::string("unexpected budget error message: ") + what);
+            }
+        }
+        assert_equals(true, threw);
+    }
 }
 
 // Shared LFM2 parser cases - all variants use one output format and parser
