@@ -2245,6 +2245,69 @@ static void test_anthropic_tool_conversion() {
         std::vector<raw_buffer> out_files;
         oaicompat_chat_params_parse(converted, opt, out_files);
     }
+
+    // a reference inside the tool_result of a user turn is the documented
+    // real-world shape (the client echoes the tool-search results) and must
+    // keep expanding; the same block in a non-user message is outside the
+    // documented surface and is a 400, mirroring the top-level gate.
+    {
+        json input = json::parse(R"({
+            "model": "test-model",
+            "max_tokens": 100,
+            "tools": [
+                {"name": "get_weather", "input_schema": {}}
+            ],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {}}
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": [
+                                {"type": "tool_reference", "tool_name": "get_weather"}
+                            ]
+                        }
+                    ]
+                }
+            ]
+        })");
+        json result = server_chat_convert_anthropic_to_oai(input);
+
+        const json & msgs = result.at("messages");
+        bool expanded = false;
+        for (const auto & m : msgs) {
+            if (m.value("role", std::string()) == "tool" &&
+                m.value("content", std::string()).find("get_weather") != std::string::npos) {
+                expanded = true;
+            }
+        }
+        if (!expanded) {
+            throw std::runtime_error("tool_result reference in a user turn did not expand");
+        }
+
+        for (const std::string role : { std::string("assistant"), std::string("system"), std::string("unknown_role") }) {
+            json bad = input;
+            bad["messages"][1]["role"] = role;
+            bool threw = false;
+            try {
+                server_chat_convert_anthropic_to_oai(bad);
+            } catch (const std::invalid_argument & e) {
+                threw = true;
+                std::string what = e.what();
+                if (what.find("tool_reference") == std::string::npos) {
+                    throw std::runtime_error(std::string("unexpected error message: ") + what);
+                }
+            }
+            assert_equals(true, threw);
+        }
+    }
 }
 
 static void test_anthropic_tool_reference_expansion() {

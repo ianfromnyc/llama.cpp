@@ -437,6 +437,8 @@ static void anthropic_append_reference(json & parts, const json & block, const j
 // Expand tool_reference blocks in a tool_result content array into text parts.
 // Separates a reference from its neighbours with a blank line, so the rendered
 // prompt never runs the definition into adjacent text or a second reference.
+// The carrying message must be user-role: the API documents references in
+// tool_result content of a user turn and at the top level of user content.
 static json anthropic_expand_references_in_result(const json & result_content, const json & tools,
                                                   size_t & expanded_refs, size_t & expanded_bytes, bool & has_images) {
     json parts = json::array();
@@ -619,6 +621,16 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
                             {"content", result_content.get<std::string>()}
                         });
                     } else if (result_content.is_array()) {
+                        // A reference is only documented in the tool_result of a
+                        // user turn; elsewhere it would leave the documented
+                        // surface, so reject it as the client error it is.
+                        if (role != "user") {
+                            for (const auto & c : result_content) {
+                                if (json_value(c, "type", std::string()) == "tool_reference") {
+                                    throw std::invalid_argument("tool_reference is only valid in tool_result content or user content");
+                                }
+                            }
+                        }
                         // Single-pass: build both text and content_parts, decide format at the end
                         std::string result_text;
                         bool has_images = false;
