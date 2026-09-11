@@ -331,9 +331,19 @@ static void normalize_anthropic_billing_header(std::string & system_text) {
     }
 }
 
+// Expansion of tool_reference blocks into inline definitions is capped per
+// request: each reference renders the full definition of the named tool, so an
+// unbounded number of small blocks multiplies into a huge converted body (a
+// memory amplification vector on /v1/messages and /v1/messages/count_tokens).
+static constexpr size_t ANTHROPIC_TOOL_REFERENCE_MAX_COUNT = 128;
+
 // Render one tool_reference block as the text block that carries the tool's
 // definition. Resolved against the request's full tool list, deferred or not.
-static json anthropic_tool_reference_to_text(const std::string & name, const json & tools) {
+static json anthropic_tool_reference_to_text(const std::string & name, const json & tools, size_t & expanded_refs) {
+    if (++expanded_refs > ANTHROPIC_TOOL_REFERENCE_MAX_COUNT) {
+        throw std::invalid_argument("Too many tool_reference blocks in request (limit " +
+                                    std::to_string(ANTHROPIC_TOOL_REFERENCE_MAX_COUNT) + ")");
+    }
     if (name.empty()) {
         // An absent tool_name would otherwise match a tool that itself has no
         // name; treat it as an unknown reference.
@@ -368,9 +378,12 @@ static json anthropic_tool_reference_to_text(const std::string & name, const jso
     throw std::invalid_argument("Tool reference '" + quoted + "' not found in available tools");
 }
 
-// Append a tool_reference block to a part array as the text part that carries the tool's definition. A blank line separates it from its neighbours: it rides on the preceding text part, or on its own part when the neighbour is not text (e.g. an image part).
-static void anthropic_append_reference(json & parts, const json & block, const json & tools) {
-    json ref = anthropic_tool_reference_to_text(json_value(block, "tool_name", std::string()), tools);
+// Append a tool_reference block to a part array as the text part that carries
+// the tool's definition. A blank line separates it from its neighbours: it
+// rides on the preceding text part, or on its own part when the neighbour is
+// not text (e.g. an image part).
+static void anthropic_append_reference(json & parts, const json & block, const json & tools, size_t & expanded_refs) {
+    json ref = anthropic_tool_reference_to_text(json_value(block, "tool_name", std::string()), tools, expanded_refs);
     if (!parts.empty() && json_value(parts.back(), "type", std::string()) == "text") {
         parts.back()["text"] = json_value(parts.back(), "text", std::string()) + "\n\n";
     } else if (!parts.empty()) {
@@ -382,13 +395,13 @@ static void anthropic_append_reference(json & parts, const json & block, const j
 // Expand tool_reference blocks in a tool_result content array into text parts.
 // Separates a reference from its neighbours with a blank line, so the rendered
 // prompt never runs the definition into adjacent text or a second reference.
-static json anthropic_expand_references_in_result(const json & result_content, const json & tools, bool & has_images) {
+static json anthropic_expand_references_in_result(const json & result_content, const json & tools, size_t & expanded_refs, bool & has_images) {
     json parts = json::array();
     std::string pending_sep;
     for (const auto & c : result_content) {
         std::string c_type = json_value(c, "type", std::string());
         if (c_type == "tool_reference") {
-            anthropic_append_reference(parts, c, tools);
+            anthropic_append_reference(parts, c, tools, expanded_refs);
             pending_sep = "\n\n";
         } else if (c_type == "text") {
             std::string text = json_value(c, "text", std::string());
@@ -427,6 +440,8 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
     // message resolves against the request's own tool list.
     json oai_tools = json::array();
     const json tools = body.contains("tools") && body.at("tools").is_array() ? body.at("tools") : json::array();
+    // shared across the whole request: the cap is on total expansions, not per block
+    size_t expanded_refs = 0;
 
     // Convert system prompt
     json oai_messages = json::array();
@@ -503,7 +518,7 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
                     converted_content.push_back(norm);
                 } else if (type == "tool_reference") {
                     // The API allows a reference outside a tool result too.
-                    anthropic_append_reference(converted_content, block, tools);
+                    anthropic_append_reference(converted_content, block, tools, expanded_refs);
                     pending_ref_sep = "\n\n";
                 } else if (type == "thinking") {
                     reasoning_content += json_value(block, "thinking", std::string());
@@ -556,7 +571,7 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
                         // Single-pass: build both text and content_parts, decide format at the end
                         std::string result_text;
                         bool has_images = false;
-                        json content_parts = anthropic_expand_references_in_result(result_content, tools, has_images);
+                        json content_parts = anthropic_expand_references_in_result(result_content, tools, expanded_refs, has_images);
 
                         if (!has_images) {
                             // Text-only: collapse to a plain string for maximum compatibility

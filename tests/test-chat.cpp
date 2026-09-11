@@ -2463,6 +2463,44 @@ static void test_anthropic_tool_reference_expansion() {
         }
         assert_equals(true, threw);
     }
+
+    // 8. expansion is capped: many references must not multiply into a huge
+    //    converted body (a memory amplification vector on /v1/messages and,
+    //    cheaper for an attacker, /v1/messages/count_tokens).
+    {
+        const std::string schema(1024, 'p'); // a chunky input_schema
+        json big_tools = json::array({
+            json{
+                {"name", "big_tool"},
+                {"description", "Big tool"},
+                {"input_schema", {{"type", "object"}, {"description", schema}}},
+            },
+        });
+        json content = json::array();
+        for (int i = 0; i < 1024; ++i) {
+            content.push_back({{"type", "tool_reference"}, {"tool_name", "big_tool"}});
+        }
+        json input = {
+            {"model", "test-model"},
+            {"max_tokens", 100},
+            {"tools", big_tools},
+            {"messages", json::array({
+                json{{"role", "user"}, {"content", content}},
+            })},
+        };
+
+        bool threw = false;
+        try {
+            server_chat_convert_anthropic_to_oai(input);
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            std::string what = e.what();
+            if (what.find("tool_reference") == std::string::npos) {
+                throw std::runtime_error(std::string("unexpected cap error message: ") + what);
+            }
+        }
+        assert_equals(true, threw);
+    }
 }
 
 // Shared LFM2 parser cases - all variants use one output format and parser
