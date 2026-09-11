@@ -1862,7 +1862,8 @@ static void test_tool_defer_loading() {
     }
 
     // 5. deferring everything would render a prompt that never mentions tools
-    //    while the grammar still expects calls - reject it instead.
+    //    while the grammar still expects calls - reject it with a 400-shaped
+    //    invalid_argument, not the generic parse wrapper.
     {
         common_chat_tool other = special_function_tool;
         other.defer_loading    = true;
@@ -1870,11 +1871,35 @@ static void test_tool_defer_loading() {
         try {
             common_chat_tools_parse_oaicompat(
                 common_chat_tools_to_json_oaicompat({ deferred_tool, other }));
-        } catch (const std::exception &) {
+        } catch (const std::invalid_argument & e) {
             threw = true;
+            assert_equals(std::string("All tools have defer_loading set; at least one must be rendered"),
+                          std::string(e.what()));
         }
         if (!threw) {
             throw std::runtime_error("expected an error when every tool sets defer_loading");
+        }
+    }
+
+    // 5b. a malformed tool is rejected, and the error must not echo the
+    //     client's whole tool payload back.
+    {
+        json bad = json::parse(R"([
+            {"type": "function", "function": {"name": "f", "description": "secret_marker"}},
+            {"type": "bogus"}
+        ])");
+        bool threw = false;
+        try {
+            common_chat_tools_parse_oaicompat(bad);
+        } catch (const std::exception & e) {
+            threw = true;
+            std::string what = e.what();
+            if (what.find("secret_marker") != std::string::npos) {
+                throw std::runtime_error(std::string("unexpected parse error message: ") + what);
+            }
+        }
+        if (!threw) {
+            throw std::runtime_error("expected an error for an unsupported tool type");
         }
     }
 }

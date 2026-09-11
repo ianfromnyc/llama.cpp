@@ -585,51 +585,47 @@ json common_chat_tools_to_json_oaicompat(const std::vector<common_chat_tool> & t
 std::vector<common_chat_tool> common_chat_tools_parse_oaicompat(const json & tools) {
     std::vector<common_chat_tool> result;
 
-    try {
-        if (!tools.is_null()) {
-            if (!tools.is_array()) {
-                throw std::invalid_argument("Expected 'tools' to be an array, got " + tools.dump());
+    if (!tools.is_null()) {
+        if (!tools.is_array()) {
+            throw std::invalid_argument("Expected 'tools' to be an array, got " + tools.dump());
+        }
+        for (const auto & tool : tools) {
+            if (!tool.contains("type")) {
+                throw std::invalid_argument("Missing tool type: " + tool.dump());
             }
-            for (const auto & tool : tools) {
-                if (!tool.contains("type")) {
-                    throw std::invalid_argument("Missing tool type: " + tool.dump());
-                }
-                const auto & type = tool.at("type");
-                if (!type.is_string() || type != "function") {
-                    throw std::invalid_argument("Unsupported tool type: " + tool.dump());
-                }
-                if (!tool.contains("function")) {
-                    throw std::invalid_argument("Missing tool function: " + tool.dump());
-                }
+            const auto & type = tool.at("type");
+            if (!type.is_string() || type != "function") {
+                throw std::invalid_argument("Unsupported tool type: " + tool.dump());
+            }
+            if (!tool.contains("function")) {
+                throw std::invalid_argument("Missing tool function: " + tool.dump());
+            }
 
-                const auto & function = tool.at("function");
-                // Accept the flag on the tool object or inside "function" -
-                // clients differ on where they put it.
-                const bool defer = tool.value("defer_loading", false) ||
-                                   function.value("defer_loading", false);
-                result.push_back({
-                    /* .name = */ function.at("name"),
-                    /* .description = */ function.value("description", ""),
-                    /* .parameters = */ function.value("parameters", json::object()).dump(),
-                    /* .defer_loading = */ defer,
-                });
-            }
+            const auto & function = tool.at("function");
+            // Accept the flag on the tool object or inside "function" -
+            // clients differ on where they put it.
+            const bool defer = tool.value("defer_loading", false) ||
+                               function.value("defer_loading", false);
+            result.push_back({
+                /* .name = */ function.at("name"),
+                /* .description = */ function.value("description", ""),
+                /* .parameters = */ function.value("parameters", json::object()).dump(),
+                /* .defer_loading = */ defer,
+            });
         }
-        // Every template renders its tool section conditionally on a non-empty
-        // tool list, so deferring all of them would produce a prompt that never
-        // mentions tools while the grammar still expects calls.
-        bool any_rendered = false;
-        for (const auto & tool : result) {
-            if (!tool.defer_loading) {
-                any_rendered = true;
-                break;
-            }
+    }
+    // Every template renders its tool section conditionally on a non-empty
+    // tool list, so deferring all of them would produce a prompt that never
+    // mentions tools while the grammar still expects calls.
+    bool any_rendered = false;
+    for (const auto & tool : result) {
+        if (!tool.defer_loading) {
+            any_rendered = true;
+            break;
         }
-        if (!result.empty() && !any_rendered) {
-            throw std::invalid_argument("All tools have defer_loading set; at least one must be rendered");
-        }
-    } catch (const std::exception & e) {
-        throw std::runtime_error("Failed to parse tools: " + std::string(e.what()) + "; tools = " + tools.dump(2));
+    }
+    if (!result.empty() && !any_rendered) {
+        throw std::invalid_argument("All tools have defer_loading set; at least one must be rendered");
     }
 
     return result;
