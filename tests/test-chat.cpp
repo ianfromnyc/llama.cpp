@@ -2233,8 +2233,25 @@ static void test_anthropic_tool_reference_expansion() {
         },
     });
 
-    // 1. a reference inside a tool_result expands into a text part carrying
-    //    the definition; text around it keeps a blank line on each side.
+    const std::string weather_ref =
+        "<tool_reference name=\"get_weather\">\n"
+        "{\"name\":\"get_weather\",\"description\":\"Get the weather\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}}\n"
+        "</tool_reference>";
+
+    // Build a request whose single user message carries the given content array.
+    auto make_input = [](const json & content, const json & req_tools) {
+        return json{
+            {"model", "test-model"},
+            {"max_tokens", 100},
+            {"tools", req_tools},
+            {"messages", json::array({
+                json{{"role", "user"}, {"content", content}},
+            })},
+        };
+    };
+
+    // 1. a reference inside a tool_result expands into the definition as text;
+    //    surrounding text keeps a blank line on each side of the definition.
     {
         json input = json::parse(R"({
             "model": "test-model",
@@ -2275,126 +2292,86 @@ static void test_anthropic_tool_reference_expansion() {
         assert_equals((size_t)2, msgs.size());
         assert_equals(std::string("assistant"), msgs[0].at("role").get<std::string>());
         assert_equals(std::string("tool"), msgs[1].at("role").get<std::string>());
-        assert_equals(std::string("1 match\n\n<tool_reference name=\"get_weather\">\n"
-                                  "{\"name\":\"get_weather\",\"description\":\"Get the weather\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}}\n"
-                                  "</tool_reference>"),
-                      msgs[1].at("content").get<std::string>());
+        assert_equals(std::string("1 match\n\n") + weather_ref, msgs[1].at("content").get<std::string>());
     }
 
-    // 2. references back to back get one blank line between each pair.
+    // 2. references back to back in a tool_result get one blank line between
+    //    each pair.
     {
-        json input = json::parse(R"({
-            "model": "test-model",
-            "max_tokens": 100,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": "toolu_1",
-                            "content": [
-                                {"type": "tool_reference", "tool_name": "get_weather"},
-                                {"type": "tool_reference", "tool_name": "get_time"}
-                            ]
-                        }
-                    ]
-                }
-            ]
-        })");
-        input["tools"] = tools;
-
-        json result = server_chat_convert_anthropic_to_oai(input);
+        auto result = server_chat_convert_anthropic_to_oai(make_input(json::array({
+            json{{"type", "tool_result"}, {"tool_use_id", "toolu_1"}, {"content", json::array({
+                json{{"type", "tool_reference"}, {"tool_name", "get_weather"}},
+                json{{"type", "tool_reference"}, {"tool_name", "get_time"}},
+            })}},
+        }), tools));
 
         const json & msgs = result.at("messages");
         assert_equals((size_t)1, msgs.size());
-        assert_equals(std::string("<tool_reference name=\"get_weather\">\n"
-                                  "{\"name\":\"get_weather\",\"description\":\"Get the weather\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}}\n"
-                                  "</tool_reference>\n\n"
-                                  "<tool_reference name=\"get_time\">\n"
-                                  "{\"name\":\"get_time\",\"description\":\"\",\"parameters\":{}}\n"
-                                  "</tool_reference>"),
+        assert_equals(std::string("tool"), msgs[0].at("role").get<std::string>());
+        assert_equals(weather_ref + "\n\n" +
+                      "<tool_reference name=\"get_time\">\n"
+                      "{\"name\":\"get_time\",\"description\":\"\",\"parameters\":{}}\n"
+                      "</tool_reference>",
                       msgs[0].at("content").get<std::string>());
     }
 
-    // 3. a reference at the top level of user content expands too.
+    // 3. a reference at the top level of user content expands too, with the
+    //    blank line riding on the following text part.
     {
-        json input = json::parse(R"({
-            "model": "test-model",
-            "max_tokens": 100,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "tool_reference", "tool_name": "get_weather"},
-                        {"type": "text", "text": "weather in Paris?"}
-                    ]
-                }
-            ]
-        })");
-        input["tools"] = tools;
-
-        json result = server_chat_convert_anthropic_to_oai(input);
+        auto result = server_chat_convert_anthropic_to_oai(make_input(json::array({
+            json{{"type", "tool_reference"}, {"tool_name", "get_weather"}},
+            json{{"type", "text"}, {"text", "weather in Paris?"}},
+        }), tools));
 
         const json & msgs = result.at("messages");
         assert_equals((size_t)1, msgs.size());
         assert_equals(std::string("user"), msgs[0].at("role").get<std::string>());
         const json & parts = msgs[0].at("content");
         assert_equals((size_t)2, parts.size());
-        assert_equals(std::string("<tool_reference name=\"get_weather\">\n"
-                                  "{\"name\":\"get_weather\",\"description\":\"Get the weather\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}}\n"
-                                  "</tool_reference>"),
-                      parts[0].at("text").get<std::string>());
+        assert_equals(weather_ref, parts[0].at("text").get<std::string>());
         assert_equals(std::string("\n\nweather in Paris?"), parts[1].at("text").get<std::string>());
     }
 
-    // 3b. a text block without a text member must convert as empty text, so the
-    //     reference after it still finds a text part to hang its separator on.
+    // 4. a text block without a text member must convert as empty text, so the
+    //    reference after it still finds a text part to hang its separator on.
     {
-        json input = json::parse(R"({
-            "model": "test-model",
-            "max_tokens": 100,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text"},
-                        {"type": "tool_reference", "tool_name": "get_weather"}
-                    ]
-                }
-            ]
-        })");
-        input["tools"] = tools;
-
-        json result = server_chat_convert_anthropic_to_oai(input);
+        auto result = server_chat_convert_anthropic_to_oai(make_input(json::array({
+            json{{"type", "text"}},
+            json{{"type", "tool_reference"}, {"tool_name", "get_weather"}},
+        }), tools));
 
         const json & parts = result.at("messages")[0].at("content");
         assert_equals((size_t)2, parts.size());
         // the blank line rides on the empty text part before the reference
         assert_equals(std::string("\n\n"), parts[0].at("text").get<std::string>());
-        assert_equals(std::string("<tool_reference name=\"get_weather\">\n"
-                                  "{\"name\":\"get_weather\",\"description\":\"Get the weather\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}}\n"
-                                  "</tool_reference>"),
-                      parts[1].at("text").get<std::string>());
+        assert_equals(weather_ref, parts[1].at("text").get<std::string>());
     }
 
-    // 4. a reference to a name not in tools is a 400, and the echoed name in
+    // 5. a reference that follows an image inside a tool_result must not crash
+    //    on the image part; the blank line goes on its own part before the
+    //    definition.
+    {
+        auto result = server_chat_convert_anthropic_to_oai(make_input(json::array({
+            json{{"type", "tool_result"}, {"tool_use_id", "toolu_1"}, {"content", json::array({
+                json{{"type", "image"}, {"source", {{"type", "url"}, {"url", "https://example.com/x.png"}}}},
+                json{{"type", "tool_reference"}, {"tool_name", "get_weather"}},
+            })}},
+        }), tools));
+
+        const json & parts = result.at("messages")[0].at("content");
+        assert_equals((size_t)3, parts.size());
+        assert_equals(std::string("image_url"), parts[0].at("type").get<std::string>());
+        assert_equals(std::string("\n\n"), parts[1].at("text").get<std::string>());
+        assert_equals(weather_ref, parts[2].at("text").get<std::string>());
+    }
+
+    // 6. a reference to a name not in tools is a 400, and the echoed name in
     //    the error is bounded and stripped of control characters, so it can
     //    neither bloat the 400 body and log nor forge log lines.
     {
-        json input = json::parse(R"({
-            "model": "test-model",
-            "max_tokens": 100,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "tool_reference", "tool_name": "no_such_tool"}
-                    ]
-                }
-            ]
-        })");
-        input["tools"] = tools;
+        json input = make_input(json::array({
+            json{{"type", "tool_reference"}, {"tool_name", "no_such_tool"}},
+        }), tools);
 
         bool threw = false;
         try {
@@ -2429,86 +2406,14 @@ static void test_anthropic_tool_reference_expansion() {
         }
     }
 
-    // 5. a reference that follows an image must not crash on the image part;
-    //    the blank line goes on its own part before the definition.
-    {
-        json input = json::parse(R"({
-            "model": "test-model",
-            "max_tokens": 100,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": "toolu_1",
-                            "content": [
-                                {"type": "image", "source": {"type": "url", "url": "https://example.com/x.png"}},
-                                {"type": "tool_reference", "tool_name": "get_weather"}
-                            ]
-                        }
-                    ]
-                }
-            ]
-        })");
-        input["tools"] = tools;
-
-        json result = server_chat_convert_anthropic_to_oai(input);
-
-        const json & parts = result.at("messages")[0].at("content");
-        assert_equals((size_t)3, parts.size());
-        assert_equals(std::string("image_url"), parts[0].at("type").get<std::string>());
-        assert_equals(std::string("\n\n"), parts[1].at("text").get<std::string>());
-        assert_equals(std::string("<tool_reference name=\"get_weather\">\n"
-                                  "{\"name\":\"get_weather\",\"description\":\"Get the weather\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}}\n"
-                                  "</tool_reference>"),
-                      parts[2].at("text").get<std::string>());
-    }
-
-    // 6. a missing or empty tool_name is treated as an unknown reference (400),
+    // 7. a missing or empty tool_name is treated as an unknown reference (400),
     //    not as a match against a tool that itself has no name.
     {
-        json input = json::parse(R"({
-            "model": "test-model",
-            "max_tokens": 100,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "tool_reference"}
-                    ]
-                }
-            ]
-        })");
-        input["tools"] = tools;
-
-        bool threw = false;
-        try {
-            server_chat_convert_anthropic_to_oai(input);
-        } catch (const std::invalid_argument & e) {
-            threw = true;
-            assert_equals(std::string("Tool reference '' not found in available tools"), std::string(e.what()));
-        }
-        assert_equals(true, threw);
-    }
-
-    // 7. an empty tool_name must not match a tool that itself lacks a name.
-    {
-        json input = json::parse(R"({
-            "model": "test-model",
-            "max_tokens": 100,
-            "tools": [
-                {"description": "unnamed tool", "input_schema": {}}
-            ],
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "tool_reference"}
-                    ]
-                }
-            ]
-        })");
+        json input = make_input(json::array({
+            json{{"type", "tool_reference"}},
+        }), json::array({
+            json{{"description", "unnamed tool"}, {"input_schema", json::object()}},
+        }));
 
         bool threw = false;
         try {
@@ -2534,20 +2439,12 @@ static void test_anthropic_tool_reference_expansion() {
         });
         json content = json::array();
         for (int i = 0; i < 1024; ++i) {
-            content.push_back({{"type", "tool_reference"}, {"tool_name", "big_tool"}});
+            content.push_back(json{{"type", "tool_reference"}, {"tool_name", "big_tool"}});
         }
-        json input = {
-            {"model", "test-model"},
-            {"max_tokens", 100},
-            {"tools", big_tools},
-            {"messages", json::array({
-                json{{"role", "user"}, {"content", content}},
-            })},
-        };
 
         bool threw = false;
         try {
-            server_chat_convert_anthropic_to_oai(input);
+            server_chat_convert_anthropic_to_oai(make_input(content, big_tools));
         } catch (const std::invalid_argument & e) {
             threw = true;
             std::string what = e.what();
