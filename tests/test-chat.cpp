@@ -2516,6 +2516,38 @@ static void test_anthropic_tool_reference_expansion() {
         }
         assert_equals(true, threw);
     }
+
+    // 9. total expansion bytes are capped too: the count cap alone still lets a
+    //    few references to a multi-megabyte tool render a huge converted body
+    //    (amplification only scales with the cap, not away).
+    {
+        const std::string schema(4 * 1024 * 1024, 'q'); // a 4 MB input_schema
+        json big_tools = json::array({
+            json{
+                {"name", "big_tool"},
+                {"description", "Big tool"},
+                {"input_schema", {{"type", "object"}, {"description", schema}}},
+            },
+        });
+        // well under the count cap: amplification must be bounded by bytes,
+        // not by how few references it takes to exceed them
+        json content = json::array();
+        for (int i = 0; i < 64; ++i) {
+            content.push_back(json{{"type", "tool_reference"}, {"tool_name", "big_tool"}});
+        }
+
+        bool threw = false;
+        try {
+            server_chat_convert_anthropic_to_oai(make_input(content, big_tools));
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            std::string what = e.what();
+            if (what.find("tool_reference") == std::string::npos) {
+                throw std::runtime_error(std::string("unexpected budget error message: ") + what);
+            }
+        }
+        assert_equals(true, threw);
+    }
 }
 
 // Shared LFM2 parser cases - all variants use one output format and parser
