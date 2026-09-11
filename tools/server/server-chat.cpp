@@ -351,12 +351,8 @@ static json anthropic_tool_reference_to_text(const std::string & name, const jso
     throw std::invalid_argument("Tool reference '" + name + "' not found in available tools");
 }
 
-// Append a tool_reference block to a part array as the text part that carries
-// the tool's definition, separating it from its neighbours with a blank line.
-// The blank line rides on the preceding text part, or on its own part when the
-// neighbour is not text (e.g. an image part). pending_sep then opens the next
-// text part with a blank line.
-static void anthropic_append_reference(json & parts, const json & block, const json & tools, std::string & pending_sep) {
+// Append a tool_reference block to a part array as the text part that carries the tool's definition, separating it from its neighbours with a blank line: the blank line rides on the preceding text part, or on its own part when the neighbour is not text (e.g. an image part).
+static void anthropic_append_reference(json & parts, const json & block, const json & tools) {
     json ref = anthropic_tool_reference_to_text(json_value(block, "tool_name", std::string()), tools);
     if (!parts.empty() && json_value(parts.back(), "type", std::string()) == "text") {
         parts.back()["text"] = json_value(parts.back(), "text", std::string()) + "\n\n";
@@ -364,7 +360,6 @@ static void anthropic_append_reference(json & parts, const json & block, const j
         parts.push_back({{"type", "text"}, {"text", "\n\n"}});
     }
     parts.push_back(ref);
-    pending_sep = "\n\n";
 }
 
 // Expand tool_reference blocks in a tool_result content array into text parts.
@@ -376,7 +371,8 @@ static json anthropic_expand_references_in_result(const json & result_content, c
     for (const auto & c : result_content) {
         std::string c_type = json_value(c, "type", std::string());
         if (c_type == "tool_reference") {
-            anthropic_append_reference(parts, c, tools, pending_sep);
+            anthropic_append_reference(parts, c, tools);
+            pending_sep = "\n\n";
         } else if (c_type == "text") {
             std::string text = json_value(c, "text", std::string());
             parts.push_back({
@@ -491,7 +487,8 @@ json server_chat_convert_anthropic_to_oai(const json & body) {
                     converted_content.push_back(norm);
                 } else if (type == "tool_reference") {
                     // The API allows a reference outside a tool result too.
-                    anthropic_append_reference(converted_content, block, tools, pending_ref_sep);
+                    anthropic_append_reference(converted_content, block, tools);
+                    pending_ref_sep = "\n\n";
                 } else if (type == "thinking") {
                     reasoning_content += json_value(block, "thinking", std::string());
                 } else if (type == "image") {
