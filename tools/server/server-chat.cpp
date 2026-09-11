@@ -341,9 +341,9 @@ static void normalize_anthropic_billing_header(std::string & system_text) {
 static constexpr size_t ANTHROPIC_TOOL_REFERENCE_MAX_COUNT = 128;
 
 // A few references to huge tools multiply the request size just as well, so
-// the total bytes of rendered definitions are capped too. 1 MB keeps the
-// converted body in the same order as the request itself, so expansion can
-// amplify a request only marginally regardless of schema size.
+// the total bytes of rendered definitions are capped too. The safety comes
+// from the absolute ceiling: whatever the schemas, expansion adds at most
+// 1 MB to the converted body.
 static constexpr size_t ANTHROPIC_TOOL_REFERENCE_MAX_BYTES = 1024 * 1024;
 
 // Render one tool_reference block as the text block that carries the tool's
