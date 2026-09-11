@@ -1786,6 +1786,34 @@ static void test_tools_oaicompat_json_conversion() {
                               "  }\n"
                               "]"),
                   common_chat_tools_to_json_oaicompat({ special_function_tool }).dump(2));
+
+    // malformed tool input is rejected with a 400-shaped invalid_argument whose
+    // message names the problem without echoing the payload back
+    const std::vector<std::pair<const char *, const char *>> bad_input = {
+        { R"([{"type": "function", "function": {"name": "f", "description": "secret_marker"}}, {"type": "bogus"}])",
+          "Unsupported tool type (expected \"function\")" },
+        { R"({"type": "bogus", "secret_marker": "x"})",
+          "Expected 'tools' to be an array" },
+        { R"([{"type": "function", "defer_loading": 1, "function": {"name": "f", "parameters": {}}}])",
+          "defer_loading must be a boolean" },
+        { R"([{"type": "function", "function": {"description": "secret_marker"}}])",
+          "Tool function must have a string name" },
+    };
+    for (const auto & entry : bad_input) {
+        bool threw = false;
+        try {
+            common_chat_tools_parse_oaicompat(json::parse(entry.first));
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            std::string what = e.what();
+            if (what.find(entry.second) == std::string::npos || what.find("secret_marker") != std::string::npos) {
+                throw std::runtime_error(std::string("unexpected parse error message: ") + what);
+            }
+        }
+        if (!threw) {
+            throw std::runtime_error(std::string("expected an error for: ") + entry.first);
+        }
+    }
 }
 
 static void test_tool_defer_loading() {
@@ -1878,87 +1906,6 @@ static void test_tool_defer_loading() {
         }
         if (!threw) {
             throw std::runtime_error("expected an error when every tool sets defer_loading");
-        }
-    }
-
-    // 5b. a malformed tool is rejected, and the error must not echo the
-    //     client's whole tool payload back.
-    {
-        json bad = json::parse(R"([
-            {"type": "function", "function": {"name": "f", "description": "secret_marker"}},
-            {"type": "bogus"}
-        ])");
-        bool threw = false;
-        try {
-            common_chat_tools_parse_oaicompat(bad);
-        } catch (const std::exception & e) {
-            threw = true;
-            std::string what = e.what();
-            if (what.find("secret_marker") != std::string::npos) {
-                throw std::runtime_error(std::string("unexpected parse error message: ") + what);
-            }
-        }
-        if (!threw) {
-            throw std::runtime_error("expected an error for an unsupported tool type");
-        }
-    }
-
-    // 6. a non-bool defer_loading is a client error: reject with a 400-shaped
-    //    invalid_argument instead of a json type error (500).
-    {
-        json tools = json::parse(R"([
-            {"type": "function", "defer_loading": 1,
-             "function": {"name": "f", "parameters": {}}}
-        ])");
-        bool threw = false;
-        try {
-            common_chat_tools_parse_oaicompat(tools);
-        } catch (const std::invalid_argument & e) {
-            threw = true;
-            assert_equals(std::string("defer_loading must be a boolean"),
-                          std::string(e.what()));
-        }
-        if (!threw) {
-            throw std::runtime_error("expected an error for a non-bool defer_loading");
-        }
-    }
-
-    // 7. a non-array tools value is rejected without echoing the payload:
-    //    the message names the problem, it does not repeat the input.
-    {
-        json bad = json::parse(R"({"type": "bogus", "secret_marker": "x"})");
-        bool threw = false;
-        try {
-            common_chat_tools_parse_oaicompat(bad);
-        } catch (const std::invalid_argument & e) {
-            threw = true;
-            std::string what = e.what();
-            if (what.find("secret_marker") != std::string::npos ||
-                what.find("Expected 'tools' to be an array") == std::string::npos) {
-                throw std::runtime_error(std::string("unexpected parse error message: ") + what);
-            }
-        }
-        if (!threw) {
-            throw std::runtime_error("expected an error for non-array tools");
-        }
-    }
-
-    // 8. a tool whose function lacks a usable name is a 400-shaped client
-    //    error, not a bare json out_of_range (500).
-    {
-        json tools = json::parse(R"([
-            {"type": "function", "function": {"description": "no name"}}
-        ])");
-        bool threw = false;
-        try {
-            common_chat_tools_parse_oaicompat(tools);
-        } catch (const std::invalid_argument & e) {
-            threw = true;
-            assert_equals(std::string("Tool function must have a string name"),
-                          std::string(e.what()));
-        }
-        if (!threw) {
-            throw std::runtime_error("expected an error for a tool without a name");
         }
     }
 }
